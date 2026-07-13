@@ -1,0 +1,20 @@
+FROM debian:bookworm
+
+ARG EMSDK_VERSION=3.1.74
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends \
+      binutils-mips-linux-gnu build-essential ca-certificates curl git gpg \
+      jq libsdl2-dev p7zip-full pkgconf python3 wget zip \
+ && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /opt
+RUN git clone --depth 1 https://github.com/emscripten-core/emsdk.git \
+ && /opt/emsdk/emsdk install "${EMSDK_VERSION}" \
+ && /opt/emsdk/emsdk activate "${EMSDK_VERSION}"
+
+WORKDIR /build
+COPY . .
+
+ENV SKIP_SOURCE_UPDATE=1
+CMD ["bash", "-lc", "source /opt/emsdk/emsdk_env.sh && ./build.sh --core=dosbox_pure"]

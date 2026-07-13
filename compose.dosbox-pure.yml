@@ -1,0 +1,13 @@
+services:
+  builder:
+    build:
+      context: .
+      dockerfile: Dockerfile.dosbox-pure
+    environment:
+      SKIP_SOURCE_UPDATE: "1"
+    volumes:
+      - ./output:/build/output
+      - build-cache:/build/compile
+
+volumes:
+  build-cache:

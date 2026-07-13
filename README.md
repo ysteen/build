@@ -1,6 +1,20 @@
 # build
 A simple script that will download and build the emulatorjs core files
 
+## One-click DOSBox Pure Docker build
+
+This fork builds the persistent Emscripten DOSBox Pure core and keeps the
+completed EmulatorJS packages in `output/`:
+
+```bash
+./build-dosbox-pure.sh
+```
+
+Docker Compose installs the pinned Emscripten SDK in the image and reuses the
+compile tree in a named volume. The distributable files are written to the host
+`output` directory. Prebuilt copies are committed there as well, including
+`dosbox_pure.zip` and both threaded `.data` variants.
+
 This script will download and build most of the available retroarch cores.
 
 > **Warning**: Some cores do not compile on ARM based systems (such as M series MacBooks and Raspberry Pi). Use only amd64 based systems to compile.

@@ -8,4 +8,15 @@
 !/.github/workflows/compile.yml
 !/build.json
 !/cores.json
+!/Dockerfile.dosbox-pure
+!/compose.dosbox-pure.yml
+!/build-dosbox-pure.sh
+!/README.md
+!/output
+!/output/
+/output/*
+!/output/dosbox_pure.zip
+!/output/dosbox_pure-thread-wasm.data
+!/output/dosbox_pure-thread-legacy-wasm.data
+!/.dockerignore
 !/.vscode/settings.json

@@ -1190,6 +1190,21 @@
     {
         "name": "dosbox_pure",
         "extensions": [
+            "zip",
+            "dosz",
+            "exe",
+            "com",
+            "bat",
+            "iso",
+            "chd",
+            "cue",
+            "ins",
+            "img",
+            "ima",
+            "vhd",
+            "jrc",
+            "m3u",
+            "m3u8",
             "conf"
         ],
         "makeoptions": {
@@ -1203,7 +1218,8 @@
             "useKeyboard": true
         },
         "license": "LICENSE",
-        "repo": "https://github.com/EmulatorJS/dosbox-pure"
+        "repo": "https://github.com/ysteen/dosbox-pure",
+        "branch": "custom/emulatorjs-persistence"
     },
     {
         "name": "freeintv",

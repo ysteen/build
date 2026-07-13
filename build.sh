@@ -32,7 +32,8 @@
 # The log file will contain the output of the build command
 
 # argument defaults
-coreToBuild=""
+# Build only the DOSBox Pure core unless another core is explicitly requested.
+coreToBuild="dosbox_pure"
 listAllCores=false
 listCoreNames=false
 
@@ -148,12 +149,16 @@ if [ "$listAllCores" = false ]; then
         git clone --depth 1 "https://github.com/EmulatorJS/RetroArch.git" "RetroArch" || exit 1
     fi
     cd RetroArch
-    git pull
+    if [ "${SKIP_SOURCE_UPDATE:-0}" != "1" ]; then
+        git pull
+    fi
     if [ ! -d "EmulatorJS" ]; then
         git clone "https://github.com/EmulatorJS/EmulatorJS.git" "EmulatorJS" --depth 1 || exit 1
     fi
     cd EmulatorJS
-    git pull
+    if [ "${SKIP_SOURCE_UPDATE:-0}" != "1" ]; then
+        git pull
+    fi
 
     cd "$outPath"
     rm -f *.bc
@@ -169,20 +174,28 @@ compileProject() {
     custom="$7"
     build_command="$8"
     requireThreads="$9"
+    sourcePath="${10}"
 
-    if [ ! -d "$name" ]; then
-        git clone "$repo" "$name" --depth 1
+    if [ -n "$sourcePath" ] && [ "$sourcePath" != "null" ]; then
+        cd "$sourcePath" || exit 1
+        projectPath="$PWD"
+        echo "Using local source: $projectPath"
+    else
+        if [ ! -d "$name" ]; then
+            git clone "$repo" "$name" --depth 1
+            cd "$name"
+            git submodule update --init --recursive
+            cd ../
+        fi
         cd "$name"
-        git submodule update --init --recursive
-        cd ../
+        if [ "$branch" != 'null' ]; then
+            echo "Checking out branch $branch"
+            git checkout "$branch"
+        fi
+        git pull
+        git submodule update --recursive
+        projectPath="$PWD"
     fi
-    cd "$name"
-    if [ $branch != 'null' ]; then
-        echo "Checking out branch $branch"
-        git checkout "$branch"
-    fi
-    git pull
-    git submodule update --recursive
 
     if [[ "$builder" = "cmake" ]]; then
         cmakeBuildThreads
@@ -248,6 +261,7 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
     cmake_args=`echo $(_jq '.') | jq -r '.makeoptions.cmake_args[]? | @base64'`
     archives=`echo $(_jq '.') | jq -r '.makeoptions.archives[]? | @base64'`
     archives_exclude=`echo $(_jq '.') | jq -r '.makeoptions.archives_exclude[]? | @base64'`
+    sourcepath=`echo $(_jq '.') | jq -r '.sourcepath // null'`
 
     # set memory options - if initial memory is set, disable auto memory growth, otherwise enable it with a default initial memory of 256mb
     initialmemory="INITIAL_HEAP=268435456" # 256mb default
@@ -345,7 +359,7 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
 
         unset FROZEN_CACHE
         
-        compileProject "$name" "$repo.git" "$branch" "$buildpath" "$makescript" "$argumentstring" "$custom" "$build_command" "$requireThreads" >> "$logPath/$name-compile.log"
+        compileProject "$name" "$repo.git" "$branch" "$buildpath" "$makescript" "$argumentstring" "$custom" "$build_command" "$requireThreads" "$sourcepath" >> "$logPath/$name-compile.log"
 
         # write JSON stanza for this core to disk
         echo ${row} | base64 --decode > "./core.json"
@@ -353,11 +367,16 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
         if [ ! -z "$license" -a "$license" != " " ]; then
             # license file is provided - copy it
             echo "License file: $name/$license"
-            cp $name/$license "./license.txt"
+            cp "$projectPath/$license" "./license.txt"
         fi
 
         echo "Building wasm's for core $name"
         cd "$buildPath/RetroArch/emulatorjs"
+
+        proxyArg=""
+        if [ "$name" = "dosbox_pure" ]; then
+        proxyArg="--proxy-to-pthread --light-debug"
+        fi
 
         if [[ "$custom" = "true" ]]; then
             eval "$build_retroarch_command" >> "$logPath/$name-emake.log"
@@ -375,12 +394,12 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
             fi
 
             mv core-temp/threads/*.bc ./
-            emmake ./build-emulatorjs.sh --clean --threads >> "$logPath/$name-emake.log"
+            emmake ./build-emulatorjs.sh --clean --threads $proxyArg >> "$logPath/$name-emake.log"
             rm -f *.bc
 
             if [ "$requiresWebgl2" = false ]; then
                 mv core-temp/legacyThreads/*.bc ./
-                emmake ./build-emulatorjs.sh --clean --threads --legacy >> "$logPath/$name-emake.log"
+                emmake ./build-emulatorjs.sh --clean --threads --legacy $proxyArg >> "$logPath/$name-emake.log"
                 rm -f *.bc
             fi
 
