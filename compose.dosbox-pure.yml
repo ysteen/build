@@ -7,7 +7,5 @@ services:
       SKIP_SOURCE_UPDATE: "1"
     volumes:
       - ./output:/build/output
-      - build-cache:/build/compile
-
-volumes:
-  build-cache:
+      - ./compile:/build/compile
+      - ../dosbox-pure:/source/dosbox-pure

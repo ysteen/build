@@ -1189,6 +1189,7 @@
     },
     {
         "name": "dosbox_pure",
+        "sourcepath": "/source/dosbox-pure",
         "extensions": [
             "zip",
             "dosz",
