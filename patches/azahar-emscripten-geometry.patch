@@ -1,0 +1,24 @@
+diff --git a/src/citra_libretro/environment.cpp b/src/citra_libretro/environment.cpp
+index 7e9e13e..5377a9b 100644
+--- a/src/citra_libretro/environment.cpp
++++ b/src/citra_libretro/environment.cpp
+@@ -275,7 +275,19 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
+     info->geometry.base_width = geom.width;
+     info->geometry.base_height = geom.height;
++#ifdef __EMSCRIPTEN__
++    // RetroArch allocates software conversion textures from these maxima even
++    // for a hardware-rendered core. Advertising Azahar's theoretical 10x
++    // layout makes the WebAssembly frontend allocate two 8192x8192 buffers
++    // before the GL context can start. A maximum equal to the boot geometry,
++    // however, forces RetroArch to recreate the WebGL context when a game
++    // switches layout. 4096 keeps the allocation bounded while covering the
++    // normal browser viewport and practical 3DS resolution factors.
++    info->geometry.max_width = 4096;
++    info->geometry.max_height = 4096;
++#else
+     // Max must cover the largest possible layout (SideScreen at 10x = 7200).
+     info->geometry.max_width = (Core::kScreenBottomWidth + Core::kScreenTopWidth) * 10;
+     info->geometry.max_height = (Core::kScreenTopHeight + Core::kScreenBottomHeight) * 10;
++#endif
+     info->geometry.aspect_ratio = (float)geom.width / (float)geom.height;
+ }

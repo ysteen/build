@@ -12,11 +12,15 @@
 !/compose.dosbox-pure.yml
 !/build-dosbox-pure.sh
 !/README.md
+!/patches
+!/patches/
+!/patches/*.patch
 !/output
 !/output/
 /output/*
 !/output/dosbox_pure.zip
 !/output/dosbox_pure-thread-wasm.data
 !/output/dosbox_pure-thread-legacy-wasm.data
+!/output/ppsspp-thread-wasm.data
 !/.dockerignore
 !/.vscode/settings.json

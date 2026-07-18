@@ -1240,7 +1240,7 @@
     },
     {
         "name": "azahar",
-        "extensions": [ "3ds", "cci", "cxi", "elf", "axf", "app" ],
+        "extensions": [ "cia", "3ds", "cci", "cxi", "elf", "axf", "app" ],
         "makeoptions": {
             "builder": "cmake",
             "cmake_build_dir": "build-emscripten",

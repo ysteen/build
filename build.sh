@@ -152,6 +152,15 @@ if [ "$listAllCores" = false ]; then
     if [ "${SKIP_SOURCE_UPDATE:-0}" != "1" ]; then
         git pull
     fi
+
+    savestatePatch="$initialPath/patches/emulatorjs-savestate-memory.patch"
+    if git apply --check "$savestatePatch" 2>/dev/null; then
+        git apply "$savestatePatch"
+    elif ! git apply --reverse --check "$savestatePatch" 2>/dev/null; then
+        echo "Unable to apply EmulatorJS save-state memory patch" >&2
+        exit 1
+    fi
+
     if [ ! -d "EmulatorJS" ]; then
         git clone "https://github.com/EmulatorJS/EmulatorJS.git" "EmulatorJS" --depth 1 || exit 1
     fi
@@ -192,15 +201,27 @@ compileProject() {
             echo "Checking out branch $branch"
             git checkout "$branch"
         fi
-        git pull
-        git submodule update --recursive
+        if [ "${SKIP_SOURCE_UPDATE:-0}" != "1" ]; then
+            git pull
+            git submodule update --recursive
+        fi
         projectPath="$PWD"
+    fi
+
+    if [ "$name" = "azahar" ]; then
+        azaharPatch="$initialPath/patches/azahar-emscripten-geometry.patch"
+        if git apply --check "$azaharPatch" 2>/dev/null; then
+            git apply "$azaharPatch"
+        elif ! git apply --reverse --check "$azaharPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar Emscripten geometry patch" >&2
+            exit 1
+        fi
     fi
 
     if [[ "$builder" = "cmake" ]]; then
         cmakeBuildThreads
     elif [[ "$custom" = "true" ]]; then
-        eval "$build_command"
+        eval "$build_command" || exit 1
     else
         cd "$makefilePath"
 
@@ -379,7 +400,7 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
         fi
 
         if [[ "$custom" = "true" ]]; then
-            eval "$build_retroarch_command" >> "$logPath/$name-emake.log"
+            eval "$build_retroarch_command" >> "$logPath/$name-emake.log" || exit 1
         else
             if [ "$requireThreads" = false ]; then
                 mv core-temp/normal/*.bc ./

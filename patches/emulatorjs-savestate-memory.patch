@@ -1,0 +1,80 @@
+diff --git a/emscripten/emulatorjs.js b/emscripten/emulatorjs.js
+index 803e0c8..6cc739f 100644
+--- a/emscripten/emulatorjs.js
++++ b/emscripten/emulatorjs.js
+@@ -2,17 +2,21 @@
+ var LibraryEmulatorJS = {
+     $EmulatorJSGetState: function() {
+         let info = _save_state_info();
++        if (!info) {
++            throw new Error("Failed to allocate save state information");
++        }
+         let state = UTF8ToString(info).split("|");
+         if (state[2] !== "1") {
++            _free(info);
+             console.error("Failed to save state!", state[0]);
+             throw new Error(state[0]);
+         }
+         const size = parseInt(state[0]);
+         const dataStart = parseInt(state[1]);
+-        const data = HEAPU8.subarray(dataStart, dataStart + size);
++        const data = new Uint8Array(HEAPU8.subarray(dataStart, dataStart + size));
+         _free(info);
+-        _free(data);
+-        return new Uint8Array(data);
++        _free(dataStart);
++        return data;
+     },
+     $EmulatorJSGetMemoryData: function(key) {
+         let keyPtr = stringToNewUTF8(key);
+diff --git a/retroarch.c b/retroarch.c
+index 17ec9fb..ea06862 100644
+--- a/retroarch.c
++++ b/retroarch.c
+@@ -6229,12 +6229,15 @@ char* get_memory_data(char* key) {
+       RARCH_LOG("Invalid memory type: %s\n", key);
+       return NULL;
+    }
+-   char state_data[300];
+-   memset(state_data, '\0', sizeof(state_data));
++   const size_t state_data_size = 300;
++   char* state_data = (char*)malloc(state_data_size);
++   if (!state_data)
++      return NULL;
++   memset(state_data, '\0', state_data_size);
+    
+    void* data = retro_get_memory_data(id);
+    size_t size = retro_get_memory_size(id);
+-   sprintf(state_data, "%zu|%zu", size, (unsigned long)data);
++   snprintf(state_data, state_data_size, "%zu|%zu", size, (unsigned long)data);
+    return state_data; // This must be freed by the JavaScript side!
+ }
+ 
+diff --git a/tasks/task_save.c b/tasks/task_save.c
+index 3014786..807c51b 100644
+--- a/tasks/task_save.c
++++ b/tasks/task_save.c
+@@ -1835,9 +1835,12 @@ void set_save_state_in_background(bool state)
+ 
+ char* save_state_info(void)
+ {
++   const size_t state_data_size = 300;
+    void* save_data = NULL;
+-   char state_data[300]; // This should NEVER overflow. If it does we are doing something very wrong.
+-   memset(state_data, '\0', sizeof(state_data));
++   char* state_data = (char*)malloc(state_data_size);
++   if (!state_data)
++      return NULL;
++   memset(state_data, '\0', state_data_size);
+ 
+    size_t serial_size;
+ 
+@@ -1857,7 +1860,7 @@ char* save_state_info(void)
+       strcpy(state_data, "Error writing data||0");
+       return state_data;
+    }
+-   sprintf(state_data, "%zu|%zu|1", serial_size, (unsigned long)save_data);
++   snprintf(state_data, state_data_size, "%zu|%zu|1", serial_size, (unsigned long)save_data);
+    return state_data; // This must be freed by the JavaScript side!
+ }
+ 
