@@ -1,0 +1,1298 @@
+diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
+index c8da6a7..1672a21 100644
+--- a/Makefile.emulatorjs
++++ b/Makefile.emulatorjs
+@@ -176,6 +176,14 @@ LDFLAGS := -L. $(LIBS) -s STACK_SIZE=$(STACK_SIZE) -s INITIAL_MEMORY=$(INITIAL_H
+            --js-library emscripten/library_platform_emscripten.js \
+            --js-library emscripten/emulatorjs.js
+ 
++# DOSBox Pure models guest x86 page faults with GuestPageFaultException.
++# Emscripten disables C++ exception catching at link time by default, which
++# turns the first Win95 protected-mode page fault into an abort instead of
++# returning it to DOSBox's PAGE_FAULT_CATCH handler.
++ifneq (,$(findstring dosbox_pure,$(TARGET)))
++   LDFLAGS += -s NO_DISABLE_EXCEPTION_CATCHING=1
++endif
++
+ ifneq (,$(findstring same_cdi,$(TARGET)))
+    LDFLAGS += -s ASSERTIONS
+    LDFLAGS += -s EXCEPTION_CATCHING_ALLOWED="['_ZN18m68000_base_device11execute_runEv','_ZThn328_N18m68000_base_device11execute_runEv','_ZN15running_machine17start_all_devicesEv','_ZN12cli_frontend7executeEiPPc','_ZN8chd_file11open_commonEb','_ZN8chd_file13read_metadataEjjRNSt3__212basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE','_ZN8chd_file13read_metadataEjjRNSt3__26vectorIhNS0_9allocatorIhEEEE','_ZNK19netlist_mame_device19base_validity_checkER16validity_checker']"
+diff --git a/emscripten/emulatorjs.js b/emscripten/emulatorjs.js
+index 803e0c8..b488971 100644
+--- a/emscripten/emulatorjs.js
++++ b/emscripten/emulatorjs.js
+@@ -2,17 +2,21 @@
+ var LibraryEmulatorJS = {
+     $EmulatorJSGetState: function() {
+         let info = _save_state_info();
++        if (!info) {
++            throw new Error("Failed to allocate save state information");
++        }
+         let state = UTF8ToString(info).split("|");
+         if (state[2] !== "1") {
++            _free(info);
+             console.error("Failed to save state!", state[0]);
+             throw new Error(state[0]);
+         }
+         const size = parseInt(state[0]);
+         const dataStart = parseInt(state[1]);
+-        const data = HEAPU8.subarray(dataStart, dataStart + size);
++        const data = new Uint8Array(HEAPU8.subarray(dataStart, dataStart + size));
+         _free(info);
+-        _free(data);
+-        return new Uint8Array(data);
++        _free(dataStart);
++        return data;
+     },
+     $EmulatorJSGetMemoryData: function(key) {
+         let keyPtr = stringToNewUTF8(key);
+@@ -27,35 +31,33 @@ var LibraryEmulatorJS = {
+         return data;
+     },
+ 
+-    EmulatorJSShowKeyboard__deps: ['$Asyncify', 'malloc'],
+-    EmulatorJSShowKeyboard__async: true,
+-    EmulatorJSShowKeyboard__sig: 'iiii',
+-    EmulatorJSShowKeyboard: function(hintPtr, maxLength, passwordMode) {
++    EmulatorJSShowKeyboard__deps: ['malloc', 'free', 'EmulatorJSKeyboardResult'],
++    EmulatorJSShowKeyboard__sig: 'viiii',
++    EmulatorJSShowKeyboard: function(hintPtr, maxLength, passwordMode, requestId) {
+         const hint = (hintPtr && UTF8ToString(hintPtr)) || "";
+-        return Asyncify.handleSleep(function(wakeUp) {
+-            const respond = function(result) {
+-                if (typeof result !== "string") {
+-                    wakeUp(0);
+-                    return;
+-                }
+-                const lenBytes = lengthBytesUTF8(result) + 1;
+-                const ptr = _malloc(lenBytes);
+-                stringToUTF8(result, ptr, lenBytes);
+-                wakeUp(ptr);
+-            };
+-            const fn = Module.getInputText;
+-            if (typeof fn !== "function") {
+-                console.warn("EmulatorJSShowKeyboard: Module.getInputText not set, falling back to prompt()");
+-                respond(window.prompt(hint || "Enter text:", "") || null);
++        const respond = function(result) {
++            if (typeof result !== "string") {
++                _EmulatorJSKeyboardResult(requestId, 0, 1);
+                 return;
+             }
+-            Promise.resolve(fn({ hint: hint, maxLength: maxLength, password: !!passwordMode }))
+-                .then(respond)
+-                .catch(function(err) {
+-                    console.error("getInputText threw:", err);
+-                    respond(null);
+-                });
+-        });
++            const lenBytes = lengthBytesUTF8(result) + 1;
++            const ptr = _malloc(lenBytes);
++            stringToUTF8(result, ptr, lenBytes);
++            _EmulatorJSKeyboardResult(requestId, ptr, 0);
++            _free(ptr);
++        };
++        const fn = Module.getInputText;
++        if (typeof fn !== "function") {
++            console.warn("EmulatorJSShowKeyboard: Module.getInputText not set, falling back to prompt()");
++            respond(window.prompt(hint || "Enter text:", "") || null);
++            return;
++        }
++        Promise.resolve(fn({ hint: hint, maxLength: maxLength, password: !!passwordMode }))
++            .then(respond)
++            .catch(function(err) {
++                console.error("getInputText threw:", err);
++                respond(null);
++            });
+     },
+ };
+ 
+diff --git a/emscripten/library_rwebaudio.js b/emscripten/library_rwebaudio.js
+index d97bfea..0deba25 100644
+--- a/emscripten/library_rwebaudio.js
++++ b/emscripten/library_rwebaudio.js
+@@ -15,7 +15,10 @@ var LibraryRWebAudio = {
+       latency: 0,
+       virtualBufferFrames: 0,
+       currentTimeDiff: 0,
+-      extraLatencySec: 0
++      extraLatencySec: 0,
++      hasQueuedBuffer: false,
++      lastStatsReport: 0,
++      stats: null
+    },
+ 
+    /* AudioContext.currentTime can be inaccurate: https://bugzilla.mozilla.org/show_bug.cgi?id=901247 */
+@@ -23,8 +26,48 @@ var LibraryRWebAudio = {
+       return performance.now() / 1000 - RWA.currentTimeDiff;
+    },
+ 
++   $RWebAudioStateChangeCB__deps: ["$RWebAudioPublishStats"],
+    $RWebAudioStateChangeCB: function() {
+       RWA.contextRunning = RWA.context.state == "running";
++      RWebAudioPublishStats("statechange", 0, 0);
++   },
++
++   $RWebAudioPublishStats__deps: ["$RWebAudioGetCurrentTime"],
++   $RWebAudioPublishStats: function(event, requested, queued) {
++      if (!RWA.stats) return;
++
++      const now = RWebAudioGetCurrentTime();
++      const sampleRate = RWA.context ? RWA.context.sampleRate : 0;
++      const occupancy = RWA.context
++         ? Math.max(0, Math.round((RWA.endTime - now) * sampleRate))
++         : 0;
++      RWA.stats.occupancyFrames = occupancy;
++      RWA.stats.maxOccupancyFrames = Math.max(RWA.stats.maxOccupancyFrames, occupancy);
++      RWA.stats.lastRequestedFrames = requested || 0;
++      RWA.stats.lastQueuedFrames = queued || 0;
++
++      const wallNow = performance.now();
++      if (wallNow - RWA.lastStatsReport < 1000) return;
++      const sample = {
++         at: Date.now(),
++         event: event || "update",
++         contextState: RWA.context ? RWA.context.state : "uninitialized",
++         sampleRate,
++         latencyMs: RWA.latency,
++         occupancyFrames: RWA.stats.occupancyFrames,
++         occupancyMs: sampleRate ? (RWA.stats.occupancyFrames * 1000) / sampleRate : 0,
++         maxOccupancyFrames: RWA.stats.maxOccupancyFrames,
++         queueCalls: RWA.stats.queueCalls,
++         queuedFrames: RWA.stats.queuedFrames,
++         rejectedBuffers: RWA.stats.rejectedBuffers,
++         droppedFrames: RWA.stats.droppedFrames,
++         underruns: RWA.stats.underruns,
++         contextNotRunning: RWA.stats.contextNotRunning
++      };
++      globalThis.__EJS_AUDIO_STATS__ = sample;
++      if (typeof globalThis.__reportBrowserLog === "function")
++         globalThis.__reportBrowserLog("rwebaudio", sample);
++      RWA.lastStatsReport = wallNow;
+    },
+ 
+    RWebAudioResumeCtx: function() {
+@@ -41,11 +84,26 @@ var LibraryRWebAudio = {
+       RWA.currentTimeDiff = performance.now() / 1000 - RWA.context.currentTime;
+       RWA.nonblock = false;
+       RWA.endTime = 0;
++      RWA.hasQueuedBuffer = false;
+       RWA.latency = latency;
+       RWA.virtualBufferFrames = Math.round(RWA.latency * RWA.context.sampleRate / 1000);
++      RWA.lastStatsReport = 0;
++      RWA.stats = {
++         occupancyFrames: 0,
++         maxOccupancyFrames: 0,
++         queueCalls: 0,
++         queuedFrames: 0,
++         rejectedBuffers: 0,
++         droppedFrames: 0,
++         underruns: 0,
++         contextNotRunning: 0,
++         lastRequestedFrames: 0,
++         lastQueuedFrames: 0
++      };
+       RWA.context.addEventListener("statechange", RWebAudioStateChangeCB);
+       RWebAudioStateChangeCB();
+       RWA.extraLatencySec = (_platform_emscripten_get_browser() == RWA.PLATFORM_EMSCRIPTEN_BROWSER_CHROMIUM) ? RWA.EXTRA_LATENCY_SEC_CHROME : RWA.EXTRA_LATENCY_SEC_NONCHROME;
++      RWebAudioPublishStats("init", 0, 0);
+ 
+       return 1;
+    },
+@@ -54,10 +112,26 @@ var LibraryRWebAudio = {
+       return RWA.context.sampleRate;
+    },
+ 
+-   RWebAudioQueueBuffer__deps: ["$RWebAudioGetCurrentTime", "RWebAudioResumeCtx", "RWebAudioWriteAvailFrames"],
++   RWebAudioQueueBuffer__deps: ["$RWebAudioGetCurrentTime", "$RWebAudioPublishStats", "RWebAudioResumeCtx", "RWebAudioWriteAvailFrames"],
+    RWebAudioQueueBuffer: function(num_frames, left, right) {
+-      if (RWA.nonblock && _RWebAudioWriteAvailFrames() < num_frames) return 0;
+-      if (!_RWebAudioResumeCtx()) return 0;
++      if (!RWA.context || !RWA.stats) return 0;
++      RWA.stats.queueCalls++;
++      const currentTime = RWebAudioGetCurrentTime();
++      if (RWA.hasQueuedBuffer && RWA.endTime <= currentTime)
++         RWA.stats.underruns++;
++
++      if (RWA.nonblock && _RWebAudioWriteAvailFrames() < num_frames) {
++         RWA.stats.rejectedBuffers++;
++         RWA.stats.droppedFrames += num_frames;
++         RWebAudioPublishStats("buffer-full", num_frames, 0);
++         return 0;
++      }
++      if (!_RWebAudioResumeCtx()) {
++         RWA.stats.contextNotRunning++;
++         RWA.stats.droppedFrames += num_frames;
++         RWebAudioPublishStats("context-not-running", num_frames, 0);
++         return 0;
++      }
+ 
+       var buffer = RWA.context.createBuffer(2, num_frames, RWA.context.sampleRate);
+       buffer.getChannelData(0).set(HEAPF32.subarray(left  >> 2, (left  >> 2) + num_frames));
+@@ -66,12 +140,15 @@ var LibraryRWebAudio = {
+       bufferSource.buffer = buffer;
+       bufferSource.connect(RWA.context.destination);
+ 
+-      var currentTime = RWebAudioGetCurrentTime();
+       /* when empty, start rounded up to nearest 1 ms, add MIN_START_OFFSET_SEC */
+       var startTime = RWA.endTime > currentTime ? RWA.endTime : Math.ceil(currentTime * 1000) / 1000 + RWA.MIN_START_OFFSET_SEC;
+       RWA.endTime = startTime + buffer.duration;
++      RWA.hasQueuedBuffer = true;
++      RWA.stats.queuedFrames += num_frames;
+       bufferSource.start(startTime + RWA.extraLatencySec);
+ 
++      RWebAudioPublishStats("queue", num_frames, num_frames);
++
+       return num_frames;
+    },
+ 
+@@ -87,11 +164,13 @@ var LibraryRWebAudio = {
+       RWA.nonblock = state;
+    },
+ 
+-   RWebAudioFree__deps: ["$RWebAudioStateChangeCB"],
++   RWebAudioFree__deps: ["$RWebAudioStateChangeCB", "$RWebAudioPublishStats"],
+    RWebAudioFree: function() {
++      RWebAudioPublishStats("free", 0, 0);
+       RWA.context.removeEventListener("statechange", RWebAudioStateChangeCB);
+       RWA.context.close();
+       RWA.contextRunning = false;
++      RWA.hasQueuedBuffer = false;
+    },
+ 
+    RWebAudioBufferSizeFrames: function() {
+diff --git a/emulatorjs/build-emulatorjs.sh b/emulatorjs/build-emulatorjs.sh
+index a2e7bfd..275f6d4 100755
+--- a/emulatorjs/build-emulatorjs.sh
++++ b/emulatorjs/build-emulatorjs.sh
+@@ -26,6 +26,14 @@ for i in "$@"; do
+       LIGHT_DEBUG=YES
+       shift
+       ;;
++    --proxy-to-pthread)
++      PROXY=YES
++      shift
++      ;;
++    --min-async)
++      MIN_ASYNC_MODE=YES
++      shift
++      ;;
+     *)
+       echo "Unknown option $i"
+       echo "Usage: $0 [option] ..."
+@@ -34,6 +42,8 @@ for i in "$@"; do
+       echo "  --legacy"
+       echo "  --clean"
+       echo "  --light-debug"
++      echo "  --proxy-to-pthread"
++      echo "  --min-async"
+       exit 1
+       ;;
+   esac
+@@ -62,7 +72,9 @@ fi
+ lastGles=0
+ 
+ largeStack=("mupen64plus_next" "azahar")
+-useOpenAL=()
++# RWebAudio cannot be used with PROXY_TO_PTHREAD. DOSBox Pure needs the
++# Emscripten OpenAL backend so audio remains available in the proxy build.
++useOpenAL=("dosbox_pure")
+ largeHeap=("mupen64plus_next" "picodrive" "pcsx_rearmed" "genesis_plus_gx" "genesis_plus_gx_wide" "mednafen_psx" "mednafen_psx_hw" "parallel_n64" "ppsspp" "azahar")
+ needsGles3=("ppsspp" "azahar")
+ needsThreads=("ppsspp" "azahar")
+@@ -84,6 +96,8 @@ for f in $(ls -v *_emscripten.bc); do
+   threads=0
+   have_al=0
+   have_rwebaudio=1
++  proxy_to_pthread=0
++  min_async=0
+ 
+   if [ "$LEGACY" = "YES" ]; then
+     gles3=0
+@@ -94,6 +108,15 @@ for f in $(ls -v *_emscripten.bc); do
+     pthread=4
+   fi
+ 
++  if [[ "$PROXY" = "YES" ]]; then
++    proxy_to_pthread=1
++    threads=1
++    pthread=4
++    async=0
++    # Makefile.emulatorjs rejects RWebAudio with PROXY_TO_PTHREAD.
++    have_rwebaudio=0
++  fi
++
+   if [[ $(containsElement $name "${largeStack[@]}") = 1 ]]; then
+     stack_mem=134217728 # 128mb
+   fi
+@@ -125,6 +148,21 @@ for f in $(ls -v *_emscripten.bc); do
+     exit 1
+   fi
+ 
++  # PROXY_TO_PTHREAD supplies the asynchronous main-loop boundary itself.
++  if [[ "$PROXY" = "YES" ]]; then
++    async=0
++    have_rwebaudio=0
++  fi
++
++  if [[ "$MIN_ASYNC_MODE" = "YES" ]]; then
++    if [[ "$PROXY" = "YES" ]]; then
++      echo "--min-async cannot be combined with --proxy-to-pthread"
++      exit 1
++    fi
++    async=0
++    min_async=1
++  fi
++
+   echo "-- Building core: $name --"
+   cp -f "$f" ../libretro_emscripten.a
+    
+@@ -137,6 +175,8 @@ for f in $(ls -v *_emscripten.bc); do
+   echo INITIAL_HEAP: $heap_mem
+   echo HAVE_CHD: $chd
+   echo HAVE_7ZIP: $sevenZip
++  echo PROXY_TO_PTHREAD: $proxy_to_pthread
++  echo MIN_ASYNC: $min_async
+ 
+   if [[ "$CLEAN" = "YES" ]]; then
+     if [ $lastGles != $gles3 ] ; then
+@@ -151,8 +191,8 @@ for f in $(ls -v *_emscripten.bc); do
+   fi
+ 
+   # Compile core
+-  echo "BUILD COMMAND: make -C ../ -f Makefile.emulatorjs HAVE_7ZIP=$sevenZip HAVE_CHD=$chd HAVE_THREADS=$threads PTHREAD_POOL_SIZE=$pthread ASYNC=$async HAVE_OPENGLES3=$gles3 STACK_SIZE=$stack_mem INITIAL_HEAP=$heap_mem HAVE_AL=$have_al HAVE_RWEBAUDIO=$have_rwebaudio LIGHT_DEBUG=$light_debug TARGET=${name}_libretro.js -j"$(nproc)
+-  make -C ../ -f Makefile.emulatorjs HAVE_7ZIP=$sevenZip HAVE_CHD=$chd HAVE_THREADS=$threads PTHREAD_POOL_SIZE=$pthread ASYNC=$async HAVE_OPENGLES3=$gles3 STACK_SIZE=$stack_mem INITIAL_HEAP=$heap_mem HAVE_AL=$have_al HAVE_RWEBAUDIO=$have_rwebaudio LIGHT_DEBUG=$light_debug TARGET=${name}_libretro.js -j$(nproc) || exit 1
++  echo "BUILD COMMAND: make -C ../ -f Makefile.emulatorjs HAVE_7ZIP=$sevenZip HAVE_CHD=$chd HAVE_THREADS=$threads PTHREAD_POOL_SIZE=$pthread PROXY_TO_PTHREAD=$proxy_to_pthread ASYNC=$async MIN_ASYNC=$min_async HAVE_OPENGLES3=$gles3 STACK_SIZE=$stack_mem INITIAL_HEAP=$heap_mem HAVE_AL=$have_al HAVE_RWEBAUDIO=$have_rwebaudio LIGHT_DEBUG=$light_debug TARGET=${name}_libretro.js -j"$(nproc)
++  make -C ../ -f Makefile.emulatorjs HAVE_7ZIP=$sevenZip HAVE_CHD=$chd HAVE_THREADS=$threads PTHREAD_POOL_SIZE=$pthread PROXY_TO_PTHREAD=$proxy_to_pthread ASYNC=$async MIN_ASYNC=$min_async HAVE_OPENGLES3=$gles3 STACK_SIZE=$stack_mem INITIAL_HEAP=$heap_mem HAVE_AL=$have_al HAVE_RWEBAUDIO=$have_rwebaudio LIGHT_DEBUG=$light_debug TARGET=${name}_libretro.js -j$(nproc) || exit 1
+ 
+   # Move executable files
+   out_dir="../../EmulatorJS/data/cores"
+diff --git a/frontend/drivers/platform_emscripten.c b/frontend/drivers/platform_emscripten.c
+index d54fbcf..df0bbe1 100644
+--- a/frontend/drivers/platform_emscripten.c
++++ b/frontend/drivers/platform_emscripten.c
+@@ -119,9 +119,33 @@ typedef struct
+ 
+ static emscripten_platform_data_t *emscripten_platform_data = NULL;
+ 
++static void platform_record_sleep(unsigned msec)
++{
++   static double last_report = 0.0;
++   static unsigned calls = 0;
++   static unsigned total_ms = 0;
++   const double now = emscripten_get_now();
++
++   calls++;
++   total_ms += msec;
++   if (now - last_report < 1000.0)
++      return;
++
++   EM_ASM(({
++      const sample = { at: Date.now(), calls: $0, totalMs: $1 };
++      globalThis.__RA_ASYNCIFY_STATS__ = sample;
++      if (typeof globalThis.__reportBrowserLog === "function")
++         globalThis.__reportBrowserLog("asyncify-sleep", sample);
++   }), calls, total_ms);
++   last_report = now;
++   calls = 0;
++   total_ms = 0;
++}
++
+ /* defined here since implementation is frontend dependent */
+ void retro_sleep(unsigned msec)
+ {
++   platform_record_sleep(msec);
+ #if defined(EMSCRIPTEN_ASYNCIFY) && !defined(HAVE_THREADS)
+    emscripten_sleep(msec);
+ #elif defined(EMSCRIPTEN_ASYNCIFY)
+@@ -347,7 +371,10 @@ void platform_emscripten_command_raise_flag()
+ void platform_emscripten_run_on_browser_thread_sync(void (*func)(void*), void* arg)
+ {
+ #ifdef PROXY_TO_PTHREAD
+-   emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), func, arg);
++   if (emscripten_is_main_browser_thread())
++      func(arg);
++   else
++      emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), func, arg);
+ #else
+    func(arg);
+ #endif
+diff --git a/frontend/drivers/platform_emulatorjs.c b/frontend/drivers/platform_emulatorjs.c
+index c9ceed1..eee0b31 100644
+--- a/frontend/drivers/platform_emulatorjs.c
++++ b/frontend/drivers/platform_emulatorjs.c
+@@ -115,10 +115,34 @@ typedef struct
+ 
+ static emscripten_platform_data_t *emscripten_platform_data = NULL;
+ 
++static void platform_record_sleep(unsigned msec)
++{
++   static double last_report = 0.0;
++   static unsigned calls = 0;
++   static unsigned total_ms = 0;
++   const double now = emscripten_get_now();
++
++   calls++;
++   total_ms += msec;
++   if (now - last_report < 1000.0)
++      return;
++
++   EM_ASM(({
++      const sample = { at: Date.now(), calls: $0, totalMs: $1 };
++      globalThis.__RA_ASYNCIFY_STATS__ = sample;
++      if (typeof globalThis.__reportBrowserLog === "function")
++         globalThis.__reportBrowserLog("asyncify-sleep", sample);
++   }), calls, total_ms);
++   last_report = now;
++   calls = 0;
++   total_ms = 0;
++}
++
+ /* defined here since implementation is frontend dependent */
+ 
+ void retro_sleep(unsigned msec)
+ {
++   platform_record_sleep(msec);
+ #if defined(EMSCRIPTEN_ASYNCIFY) && !defined(HAVE_THREADS)
+    emscripten_sleep(msec);
+ #elif defined(EMSCRIPTEN_ASYNCIFY)
+@@ -164,7 +188,10 @@ void set_vsync(int enabled)
+ void platform_emscripten_update_canvas_dimensions_cb(int width, int height, double *dpr)
+ {
+    printf("[INFO] Setting real canvas size: %d x %d\n", width, height);
+-   emscripten_set_canvas_element_size("!canvas", width, height);
++   /* The special !canvas target is local to the browser JS runtime and is
++    * not available in the proxied pthread. Use the DOM id so Emscripten can
++    * resolve and proxy the resize correctly from either thread. */
++   emscripten_set_canvas_element_size("#canvas", width, height);
+    if (!emscripten_platform_data)
+       return;
+    PLATFORM_SETVAL(u32, &emscripten_platform_data->canvas_width,        width);
+@@ -238,7 +265,13 @@ void platform_emscripten_command_raise_flag()
+ void platform_emscripten_run_on_browser_thread_sync(void (*func)(void*), void* arg)
+ {
+ #ifdef PROXY_TO_PTHREAD
+-   emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), func, arg);
++   /* EmulatorJS calls exported controls such as set_vsync() directly from
++    * the browser thread. Proxying synchronously back to that same thread is
++    * invalid and either asserts or deadlocks in Emscripten. */
++   if (emscripten_is_main_browser_thread())
++      func(arg);
++   else
++      emscripten_proxy_sync(emscripten_proxy_get_system_queue(), emscripten_main_runtime_thread_id(), func, arg);
+ #else
+    func(arg);
+ #endif
+diff --git a/input/drivers/emulatorjs_input.c b/input/drivers/emulatorjs_input.c
+index 564fee5..30c48b6 100644
+--- a/input/drivers/emulatorjs_input.c
++++ b/input/drivers/emulatorjs_input.c
+@@ -70,6 +70,7 @@ typedef struct rwebinput_pointer_states
+    int x;
+    int y;
+    int id;
++   bool offscreen;
+ } rwebinput_pointer_state_t;
+ 
+ typedef struct rwebinput_mouse_states
+@@ -85,6 +86,7 @@ typedef struct rwebinput_mouse_states
+    int delta_x;
+    int delta_y;
+    uint8_t buttons;
++   bool offscreen;
+ } rwebinput_mouse_state_t;
+ 
+ typedef struct rwebinput_motion_states
+@@ -107,6 +109,59 @@ typedef struct rwebinput_input
+    bool pointerlock_active;
+ } rwebinput_input_t;
+ 
++#ifdef __EMSCRIPTEN__
++/* Emscripten's targetX/targetY are CSS-pixel coordinates relative to the
++ * canvas element. The canvas itself is object-fit: contain, so multiplying by
++ * DPR is not sufficient when the browser adds letterboxing or the page is
++ * zoomed. Convert through the displayed content rectangle and return the
++ * actual Wasm framebuffer coordinates. */
++EM_JS(void, rwebinput_map_canvas_point,
++      (double target_x, double target_y, int out_ptr), {
++   const canvas = document.getElementById("canvas") ||
++      (typeof Module !== "undefined" ? Module.canvas : null);
++   const out = out_ptr >> 2;
++   if (!canvas) {
++      HEAP32[out] = -32768;
++      HEAP32[out + 1] = -32768;
++      HEAP32[out + 2] = 1;
++      return;
++   }
++
++   const rect = canvas.getBoundingClientRect();
++   const dpr = globalThis.devicePixelRatio || 1;
++   const source_width = canvas.width || Math.max(1, Math.round(rect.width * dpr));
++   const source_height = canvas.height || Math.max(1, Math.round(rect.height * dpr));
++   const content_width = Math.min(rect.width, rect.height * source_width / source_height);
++   const content_height = content_width * source_height / source_width;
++   const content_left = (rect.width - content_width) / 2;
++   // EmulatorJS uses object-position: top for the canvas.
++   const content_top = 0;
++   const inside = target_x >= content_left && target_x < content_left + content_width &&
++      target_y >= content_top && target_y < content_top + content_height;
++
++   if (!inside || content_width <= 0 || content_height <= 0) {
++      HEAP32[out] = -32768;
++      HEAP32[out + 1] = -32768;
++      HEAP32[out + 2] = 1;
++      return;
++   }
++
++   HEAP32[out] = Math.max(0, Math.min(source_width - 1,
++      Math.round((target_x - content_left) * source_width / content_width)));
++   HEAP32[out + 1] = Math.max(0, Math.min(source_height - 1,
++      Math.round((target_y - content_top) * source_height / content_height)));
++   HEAP32[out + 2] = 0;
++});
++#else
++static void rwebinput_map_canvas_point(double target_x, double target_y, int out_ptr)
++{
++   int *out = (int*)(uintptr_t)out_ptr;
++   out[0] = (int)target_x;
++   out[1] = (int)target_y;
++   out[2] = 0;
++}
++#endif
++
+ /* KeyboardEvent.keyCode has been deprecated for a while and doesn't have
+  * separate left/right modifier codes, so we have to map string labels from
+  * KeyboardEvent.code to retro keys */
+@@ -264,6 +319,22 @@ void ejs_set_keyboard_enabled(int enabled)
+    }
+ }
+ 
++static EM_BOOL rwebinput_blur_cb(int event_type,
++   const EmscriptenFocusEvent *focus_event, void *user_data)
++{
++   rwebinput_input_t *rwebinput = (rwebinput_input_t*)user_data;
++   (void)event_type;
++   (void)focus_event;
++
++   memset(rwebinput->keys, 0, sizeof(rwebinput->keys));
++   rwebinput->keyboard.count = 0;
++   rwebinput->mouse.buttons = 0;
++   rwebinput->mouse.offscreen = true;
++   rwebinput->pointer_count = 0;
++   zero_inputs();
++   return EM_TRUE;
++}
++
+ static EM_BOOL rwebinput_keyboard_cb(int event_type,
+    const EmscriptenKeyboardEvent *key_event, void *user_data)
+ {
+@@ -300,7 +371,9 @@ static EM_BOOL rwebinput_mouse_cb(int event_type,
+ {
+    rwebinput_input_t *rwebinput      = (rwebinput_input_t*)user_data;
+ 
+-   uint8_t mask                      = 1 << mouse_event->button;
++   uint8_t mask = (mouse_event->button >= 0 && mouse_event->button < 8)
++                     ? (uint8_t)(1u << mouse_event->button)
++                     : 0;
+ 
+    // note: movementX/movementY are pre-scaled in chromium (but not firefox)
+    // see https://github.com/w3c/pointerlock/issues/42
+@@ -315,6 +388,7 @@ static EM_BOOL rwebinput_mouse_cb(int event_type,
+ 
+       rwebinput->mouse.x += mouse_event->movementX;
+       rwebinput->mouse.y += mouse_event->movementY;
++      rwebinput->mouse.offscreen = false;
+ 
+       /* Clamp X */
+       if (rwebinput->mouse.x < 0)
+@@ -330,9 +404,15 @@ static EM_BOOL rwebinput_mouse_cb(int event_type,
+    }
+    else
+    {
+-      double dpr = platform_emscripten_get_dpr();
+-      rwebinput->mouse.x = (int)(mouse_event->targetX * dpr);
+-      rwebinput->mouse.y = (int)(mouse_event->targetY * dpr);
++      if (event_type != EMSCRIPTEN_EVENT_MOUSEUP)
++      {
++         int mapped[3];
++         rwebinput_map_canvas_point(mouse_event->targetX, mouse_event->targetY,
++                                    (int)(uintptr_t)mapped);
++         rwebinput->mouse.x = mapped[0];
++         rwebinput->mouse.y = mapped[1];
++         rwebinput->mouse.offscreen = mapped[2] != 0;
++      }
+    }
+ 
+    if (event_type ==  EMSCRIPTEN_EVENT_MOUSEDOWN)
+@@ -362,53 +442,66 @@ static EM_BOOL rwebinput_touch_cb(int event_type,
+ {
+    rwebinput_input_t *rwebinput = (rwebinput_input_t*)user_data;
+ 
+-   unsigned touches_max      = MIN(touch_event->numTouches, MAX_TOUCH);
+-   unsigned touches_released = 0;
+-
+    switch (event_type)
+    {
+       case EMSCRIPTEN_EVENT_TOUCHSTART:
+       case EMSCRIPTEN_EVENT_TOUCHMOVE:
+-         for (unsigned touch = 0; touch < touches_max; touch++)
++         for (unsigned touch = 0; touch < MIN(touch_event->numTouches, MAX_TOUCH); touch++)
+          {
+-            if (!(touch_event->touches[touch].isChanged) && rwebinput->pointer[touch].id == touch_event->touches[touch].identifier)
+-               continue;
++            const EmscriptenTouchPoint *point = &touch_event->touches[touch];
++            int slot = -1;
++            for (unsigned i = 0; i < rwebinput->pointer_count; i++)
++            {
++               if (rwebinput->pointer[i].id == point->identifier)
++               {
++                  slot = (int)i;
++                  break;
++               }
++            }
++
++            if (slot < 0)
++            {
++               if (rwebinput->pointer_count >= MAX_TOUCH)
++                  continue;
++               slot = (int)rwebinput->pointer_count++;
++               rwebinput->pointer[slot].id = point->identifier;
++            }
+ 
+-            double dpr = platform_emscripten_get_dpr();
+-            rwebinput->pointer[touch].x  = (int)(touch_event->touches[touch].targetX * dpr);
+-            rwebinput->pointer[touch].y  = (int)(touch_event->touches[touch].targetY * dpr);
+-            rwebinput->pointer[touch].id = touch_event->touches[touch].identifier;
++            int mapped[3];
++            rwebinput_map_canvas_point(point->targetX, point->targetY,
++                                       (int)(uintptr_t)mapped);
++            rwebinput->pointer[slot].x = mapped[0];
++            rwebinput->pointer[slot].y = mapped[1];
++            rwebinput->pointer[slot].offscreen = mapped[2] != 0;
+          }
+          break;
+       case EMSCRIPTEN_EVENT_TOUCHEND:
+       case EMSCRIPTEN_EVENT_TOUCHCANCEL:
+-         // note: touches_max/numTouches is out of date here - it uses the old value from before the release
+-         // note 2: I'm unsure if multiple touches can trigger the same touchend anyway...
+-         if (touches_max > 1)
++         if (touch_event->numTouches == 0)
+          {
+-            for (unsigned touch_up = 0; touch_up < touches_max; touch_up++)
++            rwebinput->pointer_count = 0;
++            break;
++         }
++         for (unsigned touch = 0; touch < MIN(touch_event->numTouches, MAX_TOUCH); touch++)
++         {
++            if (!touch_event->touches[touch].isChanged)
++               continue;
++
++            for (unsigned i = 0; i < rwebinput->pointer_count; i++)
+             {
+-               if (touch_event->touches[touch_up].isChanged)
++               if (rwebinput->pointer[i].id == touch_event->touches[touch].identifier)
+                {
+-                  memmove(rwebinput->pointer + touch_up - touches_released,
+-                          rwebinput->pointer + touch_up - touches_released + 1,
+-                          (touches_max - touch_up - 1) * sizeof(rwebinput_pointer_state_t));
+-                  touches_released++;
++                  memmove(rwebinput->pointer + i, rwebinput->pointer + i + 1,
++                          (rwebinput->pointer_count - i - 1) *
++                              sizeof(rwebinput_pointer_state_t));
++                  rwebinput->pointer_count--;
++                  break;
+                }
+             }
+          }
+-         else
+-            touches_released = 1;
+-
+-         if (touches_max > touches_released)
+-            touches_max -= touches_released;
+-         else
+-            touches_max = 0;
+          break;
+    }
+ 
+-   rwebinput->pointer_count = touches_max;
+-
+    return ejs_is_paused() ? EM_FALSE : EM_TRUE;
+ }
+ 
+@@ -471,97 +564,123 @@ static void *rwebinput_input_init(const char *joypad_driver)
+ 
+    input_keymaps_init_keyboard_lut(rarch_key_map_rwebinput);
+ 
+-   r = emscripten_set_keydown_callback("!parent", rwebinput, false,
+-         rwebinput_keyboard_cb);
++   /* With PROXY_TO_PTHREAD the RetroArch main pthread can remain inside
++    * retro_run() for a long time while DOSBox boots.  Registering HTML5
++    * callbacks with the default CALLING_THREAD target then makes the browser
++    * proxy every input event to that busy pthread.  Eventually the target
++    * queue becomes unavailable and Emscripten aborts in
++    * _emscripten_run_callback_on_thread().  Input state lives in shared Wasm
++    * memory, so handle browser events on the browser thread instead. */
++#ifdef PROXY_TO_PTHREAD
++#define EJS_HTML5_CALLBACK_THREAD EM_CALLBACK_THREAD_CONTEXT_MAIN_BROWSER_THREAD
++#else
++#define EJS_HTML5_CALLBACK_THREAD EM_CALLBACK_THREAD_CONTEXT_CALLING_THREAD
++#endif
++
++   r = emscripten_set_keydown_callback_on_thread("!parent", rwebinput, false,
++         rwebinput_keyboard_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create keydown callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_keyup_callback("!parent", rwebinput, false,
+-         rwebinput_keyboard_cb);
++   r = emscripten_set_keyup_callback_on_thread("!parent", rwebinput, false,
++         rwebinput_keyboard_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create keyup callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_keypress_callback("!parent", rwebinput, false,
+-         rwebinput_keyboard_cb);
++   r = emscripten_set_keypress_callback_on_thread("!parent", rwebinput, false,
++         rwebinput_keyboard_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create keypress callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_mousedown_callback("!canvas", rwebinput, false,
+-         rwebinput_mouse_cb);
++   r = emscripten_set_blur_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW,
++         rwebinput, false, rwebinput_blur_cb, EJS_HTML5_CALLBACK_THREAD);
++   if (r != EMSCRIPTEN_RESULT_SUCCESS)
++   {
++      RARCH_ERR(
++         "[EMSCRIPTEN/INPUT] failed to create blur callback: %d\n", r);
++   }
++
++   r = emscripten_set_mousedown_callback_on_thread("!canvas", rwebinput, false,
++         rwebinput_mouse_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create mousedown callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_mouseup_callback("!canvas", rwebinput, false,
+-         rwebinput_mouse_cb);
++   /* Release on the window as well, so dragging outside the rendered bottom
++    * screen cannot leave the virtual mouse button latched. */
++   r = emscripten_set_mouseup_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW,
++         rwebinput, false,
++         rwebinput_mouse_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create mouseup callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_mousemove_callback("!canvas", rwebinput, false,
+-         rwebinput_mouse_cb);
++   r = emscripten_set_mousemove_callback_on_thread("!canvas", rwebinput, false,
++         rwebinput_mouse_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create mousemove callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_wheel_callback("!canvas", rwebinput, false,
+-         rwebinput_wheel_cb);
++   r = emscripten_set_wheel_callback_on_thread("!canvas", rwebinput, false,
++         rwebinput_wheel_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create wheel callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_touchstart_callback("!canvas", rwebinput, false,
+-         rwebinput_touch_cb);
++   r = emscripten_set_touchstart_callback_on_thread("!canvas", rwebinput, false,
++         rwebinput_touch_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create touchstart callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_touchend_callback("!canvas", rwebinput, false,
+-         rwebinput_touch_cb);
++   r = emscripten_set_touchend_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW,
++         rwebinput, false,
++         rwebinput_touch_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create touchend callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_touchmove_callback("!canvas", rwebinput, false,
+-         rwebinput_touch_cb);
++   r = emscripten_set_touchmove_callback_on_thread("!canvas", rwebinput, false,
++         rwebinput_touch_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create touchmove callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_touchcancel_callback("!canvas", rwebinput, false,
+-         rwebinput_touch_cb);
++   r = emscripten_set_touchcancel_callback_on_thread(EMSCRIPTEN_EVENT_TARGET_WINDOW,
++         rwebinput, false,
++         rwebinput_touch_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+          "[EMSCRIPTEN/INPUT] failed to create touchcancel callback: %d\n", r);
+    }
+ 
+-   r = emscripten_set_pointerlockchange_callback(
++   r = emscripten_set_pointerlockchange_callback_on_thread(
+          EMSCRIPTEN_EVENT_TARGET_DOCUMENT, rwebinput, false,
+-         rwebinput_pointerlockchange_cb);
++         rwebinput_pointerlockchange_cb, EJS_HTML5_CALLBACK_THREAD);
+    if (r != EMSCRIPTEN_RESULT_SUCCESS)
+    {
+       RARCH_ERR(
+@@ -590,7 +709,8 @@ static int16_t rwebinput_mouse_state(
+       case RETRO_DEVICE_ID_MOUSE_Y:
+          return (int16_t)(screen ? mouse->y : mouse->delta_y);
+       case RETRO_DEVICE_ID_MOUSE_LEFT:
+-         return !!(mouse->buttons & (1 << RWEBINPUT_MOUSE_BTNL));
++         return !!(mouse->buttons & (1 << RWEBINPUT_MOUSE_BTNL)) &&
++            !mouse->offscreen;
+       case RETRO_DEVICE_ID_MOUSE_RIGHT:
+          return !!(mouse->buttons & (1 << RWEBINPUT_MOUSE_BTNR));
+       case RETRO_DEVICE_ID_MOUSE_MIDDLE:
+@@ -618,7 +738,12 @@ static int16_t rwebinput_is_pressed(
+       unsigned port, unsigned id,
+       bool keyboard_mapping_blocked)
+ {
+-   return 0;
++   (void)port;
++   if (keyboard_mapping_blocked || !keyboard_enabled || !binds || !binds[id].valid)
++      return 0;
++
++   const int key = binds[id].key;
++   return key > 0 && key < RETROK_LAST && rwebinput_key_pressed(rwebinput, key);
+ }
+ 
+ struct rwebinput_code_to_key
+@@ -704,6 +829,48 @@ int ejs_is_pressed(int user, int id) {
+     return 0;
+ }
+ 
++static void rwebinput_publish_input_stats(rwebinput_input_t *rwebinput)
++{
++#ifdef __EMSCRIPTEN__
++   static double last_report = 0.0;
++   const double now = emscripten_get_now();
++   if (now - last_report < 1000.0)
++      return;
++
++   unsigned joypad_mask = 0;
++   for (unsigned id = 0; id < RARCH_FIRST_CUSTOM_BIND && id < 32; id++)
++   {
++      if (ejs_is_pressed(0, id))
++         joypad_mask |= 1u << id;
++   }
++
++   bool pointer_pressed =
++      !!(rwebinput->mouse.buttons & (1 << RWEBINPUT_MOUSE_BTNL)) &&
++      !rwebinput->mouse.offscreen;
++   for (unsigned i = 0; i < rwebinput->pointer_count; i++)
++      pointer_pressed |= !rwebinput->pointer[i].offscreen;
++   EM_ASM(({
++      const sample = {
++         at: Date.now(),
++         joypadMask: $0,
++         pointer: {
++            x: $1,
++            y: $2,
++            pressed: !!$3,
++            count: $4
++         }
++      };
++      globalThis.__RA_INPUT_STATS__ = sample;
++      if (typeof globalThis.__reportBrowserLog === "function")
++         globalThis.__reportBrowserLog("retro-input", sample);
++   }), joypad_mask, rwebinput->mouse.x, rwebinput->mouse.y,
++      pointer_pressed, rwebinput->pointer_count);
++   last_report = now;
++#else
++   (void)rwebinput;
++#endif
++}
++
+ static int16_t rwebinput_input_state(
+       void *data,
+       const input_device_driver_t *joypad,
+@@ -739,14 +906,19 @@ static int16_t rwebinput_input_state(
+             return ret;
+          }
+ 
++         /* EmulatorJS writes directly to the shared ejs keymap. That state
++          * must be visible even when RetroArch has no local keyboard bind for
++          * this button; Azahar asks for individual button ids rather than the
++          * aggregate mask. */
++         if (id < RARCH_FIRST_CUSTOM_BIND && ejs_is_pressed(port, id))
++            return 1;
++
+          if (id < RARCH_BIND_LIST_END)
+          {
+             if (binds[port][id].valid)
+             {
+-               if (ejs_is_pressed(port, id) || rwebinput_is_pressed(rwebinput,
+-                        binds[port],
+-                        port, id,
+-                        keyboard_mapping_blocked))
++               if (rwebinput_is_pressed(rwebinput, binds[port], port, id,
++                                        keyboard_mapping_blocked))
+                   return 1;
+             }
+          }
+@@ -858,13 +1030,14 @@ static int16_t rwebinput_input_state(
+             {
+                x = rwebinput->pointer[idx].x;
+                y = rwebinput->pointer[idx].y;
+-               pointer_down = true;
++               pointer_down = !rwebinput->pointer[idx].offscreen;
+             }
+             else if (idx == 0)
+             {
+                x = mouse->x;
+                y = mouse->y;
+-               pointer_down = !!(mouse->buttons & (1 << RWEBINPUT_MOUSE_BTNL));
++               pointer_down = !!(mouse->buttons & (1 << RWEBINPUT_MOUSE_BTNL)) &&
++                  !mouse->offscreen;
+                pointer_count = 1;
+             }
+             else
+@@ -953,7 +1126,8 @@ static bool rwebinput_set_sensor_state(void *data, unsigned port,
+ 
+    if (!old_state && new_state)
+    {
+-      r = emscripten_set_devicemotion_callback(rwebinput, false, rwebinput_devicemotion_cb);
++      r = emscripten_set_devicemotion_callback_on_thread(rwebinput, false,
++            rwebinput_devicemotion_cb, EJS_HTML5_CALLBACK_THREAD);
+       if (r != EMSCRIPTEN_RESULT_SUCCESS)
+       {
+          RARCH_ERR(
+@@ -963,7 +1137,8 @@ static bool rwebinput_set_sensor_state(void *data, unsigned port,
+    }
+    else if (old_state && !new_state)
+    {
+-      r = emscripten_set_devicemotion_callback(rwebinput, false, NULL);
++      r = emscripten_set_devicemotion_callback_on_thread(rwebinput, false,
++            NULL, EJS_HTML5_CALLBACK_THREAD);
+       if (r != EMSCRIPTEN_RESULT_SUCCESS)
+       {
+          RARCH_ERR(
+@@ -1067,6 +1242,8 @@ static void rwebinput_input_poll(void *data)
+    rwebinput->mouse.scroll_y         = rwebinput->mouse.pending_scroll_y;
+    rwebinput->mouse.pending_scroll_x = 0;
+    rwebinput->mouse.pending_scroll_y = 0;
++
++   rwebinput_publish_input_stats(rwebinput);
+ }
+ 
+ static void rwebinput_grab_mouse(void *data, bool state)
+diff --git a/retroarch.c b/retroarch.c
+index 17ec9fb..77b213a 100644
+--- a/retroarch.c
++++ b/retroarch.c
+@@ -6107,12 +6107,123 @@ bool EJS_PAUSED = false;
+ bool EJS_MAINLOOP_PAUSED = false;
+ bool EJS_PENDING_SCREENSHOT = false;
+ void ejs_check_save(void);
++
++typedef struct ejs_mainloop_stats
++{
++   double window_start;
++   double last_entry;
++   double entry_interval_total;
++   double entry_interval_max;
++   double runloop_total;
++   double runloop_max;
++   double audio_block_total;
++   double audio_block_max;
++   double task_total;
++   double total;
++   double total_max;
++   unsigned entries;
++   unsigned entry_intervals;
++   unsigned iterations;
++   unsigned dropped;
++   unsigned audio_blocks;
++} ejs_mainloop_stats_t;
++
++static ejs_mainloop_stats_t ejs_mainloop_stats;
++
++static double ejs_mainloop_begin(void)
++{
++   const double now = emscripten_get_now();
++   ejs_mainloop_stats.entries++;
++   if (ejs_mainloop_stats.window_start == 0.0)
++      ejs_mainloop_stats.window_start = now;
++   if (ejs_mainloop_stats.last_entry != 0.0)
++   {
++      const double interval = now - ejs_mainloop_stats.last_entry;
++      ejs_mainloop_stats.entry_interval_total += interval;
++      if (interval > ejs_mainloop_stats.entry_interval_max)
++         ejs_mainloop_stats.entry_interval_max = interval;
++      ejs_mainloop_stats.entry_intervals++;
++   }
++   ejs_mainloop_stats.last_entry = now;
++   return now;
++}
++
++static void ejs_mainloop_publish(double now)
++{
++   const double elapsed = now - ejs_mainloop_stats.window_start;
++   if (elapsed < 1000.0)
++      return;
++
++   EM_ASM(({
++      globalThis.__RA_MAINLOOP_STATS__ = {
++         at: Date.now(),
++         elapsedMs: $0,
++         entries: $1,
++         iterations: $2,
++         dropped: $3,
++         audioBlocks: $4,
++         entryIntervalMs: $5,
++         entryIntervalMaxMs: $6,
++         runloopMs: $7,
++         runloopMaxMs: $8,
++         audioBlockMs: $9,
++         audioBlockMaxMs: $10,
++         taskMs: $11,
++         callbackMs: $12,
++         callbackMaxMs: $13
++      };
++   }), elapsed, ejs_mainloop_stats.entries, ejs_mainloop_stats.iterations,
++      ejs_mainloop_stats.dropped, ejs_mainloop_stats.audio_blocks,
++      ejs_mainloop_stats.entry_intervals
++         ? ejs_mainloop_stats.entry_interval_total / ejs_mainloop_stats.entry_intervals : 0.0,
++      ejs_mainloop_stats.entry_interval_max,
++      ejs_mainloop_stats.iterations
++         ? ejs_mainloop_stats.runloop_total / ejs_mainloop_stats.iterations : 0.0,
++      ejs_mainloop_stats.runloop_max,
++      ejs_mainloop_stats.audio_blocks
++         ? ejs_mainloop_stats.audio_block_total / ejs_mainloop_stats.audio_blocks : 0.0,
++      ejs_mainloop_stats.audio_block_max,
++      ejs_mainloop_stats.iterations
++         ? ejs_mainloop_stats.task_total / ejs_mainloop_stats.iterations : 0.0,
++      ejs_mainloop_stats.entries
++         ? ejs_mainloop_stats.total / ejs_mainloop_stats.entries : 0.0,
++      ejs_mainloop_stats.total_max);
++
++   ejs_mainloop_stats.window_start = now;
++   ejs_mainloop_stats.entry_interval_total = 0.0;
++   ejs_mainloop_stats.entry_interval_max = 0.0;
++   ejs_mainloop_stats.runloop_total = 0.0;
++   ejs_mainloop_stats.runloop_max = 0.0;
++   ejs_mainloop_stats.audio_block_total = 0.0;
++   ejs_mainloop_stats.audio_block_max = 0.0;
++   ejs_mainloop_stats.task_total = 0.0;
++   ejs_mainloop_stats.total = 0.0;
++   ejs_mainloop_stats.total_max = 0.0;
++   ejs_mainloop_stats.entries = 0;
++   ejs_mainloop_stats.entry_intervals = 0;
++   ejs_mainloop_stats.iterations = 0;
++   ejs_mainloop_stats.dropped = 0;
++   ejs_mainloop_stats.audio_blocks = 0;
++}
++
++static void ejs_mainloop_end(double begin, bool dropped)
++{
++   const double now = emscripten_get_now();
++   const double duration = now - begin;
++   ejs_mainloop_stats.total += duration;
++   if (duration > ejs_mainloop_stats.total_max)
++      ejs_mainloop_stats.total_max = duration;
++   if (dropped)
++      ejs_mainloop_stats.dropped++;
++   ejs_mainloop_publish(now);
++}
+ #endif
+ static unsigned emscripten_frame_count = 0;
+ 
+ void emscripten_mainloop(void)
+ {
+ #ifdef EMULATORJS
++   const double callback_begin = ejs_mainloop_begin();
+    if (EJS_PENDING_SCREENSHOT) {
+       const char *path = "/screenshot.png";
+       video_driver_state_t *video_st = video_state_get_ptr();
+@@ -6126,6 +6237,7 @@ void emscripten_mainloop(void)
+    if (EJS_PAUSED && !EJS_MAINLOOP_PAUSED) {
+       emscripten_pause_main_loop();
+       EJS_MAINLOOP_PAUSED = true;
++      ejs_mainloop_end(callback_begin, true);
+       return;
+    }
+ #endif
+@@ -6147,7 +6259,12 @@ void emscripten_mainloop(void)
+     * we want to avoid this.
+     * 2. The GL context is lost and hasn't been recovered yet. */
+    if (platform_emscripten_should_drop_iter())
++   {
++#ifdef EMULATORJS
++      ejs_mainloop_end(callback_begin, true);
++#endif
+       return;
++   }
+ 
+ #ifdef HAVE_RWEBAUDIO
+    rwebaudio_recalibrate_time();
+@@ -6156,11 +6273,21 @@ void emscripten_mainloop(void)
+ #ifdef EMSCRIPTEN_AUDIO_FAKE_BLOCK
+ #ifdef HAVE_AUDIOWORKLET
+    if (audioworklet_external_block())
++   {
++#ifdef EMULATORJS
++      ejs_mainloop_end(callback_begin, true);
++#endif
+       return;
++   }
+ #endif
+ #ifdef HAVE_RWEBAUDIO
+    if (rwebaudio_external_block())
++   {
++#ifdef EMULATORJS
++      ejs_mainloop_end(callback_begin, true);
++#endif
+       return;
++   }
+ #endif
+ #endif
+ 
+@@ -6180,22 +6307,51 @@ void emscripten_mainloop(void)
+          if (video_st->current_video_context.swap_buffers)
+             video_st->current_video_context.swap_buffers(
+                   video_st->context_data);
++#ifdef EMULATORJS
++         ejs_mainloop_end(callback_begin, true);
++#endif
+          return;
+       }
+    }
+ 
++#ifdef EMULATORJS
++   const double runloop_begin = emscripten_get_now();
++#endif
+    ret = runloop_iterate();
++#ifdef EMULATORJS
++   const double runloop_duration = emscripten_get_now() - runloop_begin;
++   ejs_mainloop_stats.runloop_total += runloop_duration;
++   if (runloop_duration > ejs_mainloop_stats.runloop_max)
++      ejs_mainloop_stats.runloop_max = runloop_duration;
++   ejs_mainloop_stats.iterations++;
++#endif
+ 
+ #ifdef EMSCRIPTEN_AUDIO_ASYNC_BLOCK
++#ifdef EMULATORJS
++   const double audio_block_begin = emscripten_get_now();
++#endif
+ #ifdef HAVE_AUDIOWORKLET
+    audioworklet_external_block();
+ #endif
+ #ifdef HAVE_RWEBAUDIO
+    rwebaudio_external_block();
+ #endif
++#ifdef EMULATORJS
++   const double audio_block_duration = emscripten_get_now() - audio_block_begin;
++   ejs_mainloop_stats.audio_block_total += audio_block_duration;
++   if (audio_block_duration > ejs_mainloop_stats.audio_block_max)
++      ejs_mainloop_stats.audio_block_max = audio_block_duration;
++   ejs_mainloop_stats.audio_blocks++;
++#endif
+ #endif
+ 
++#ifdef EMULATORJS
++   const double task_begin = emscripten_get_now();
++#endif
+    task_queue_check();
++#ifdef EMULATORJS
++   ejs_mainloop_stats.task_total += emscripten_get_now() - task_begin;
++#endif
+ 
+ #ifdef PROXY_TO_PTHREAD
+    /* sync with requestAnimationFrame on browser thread if vsync is on */
+@@ -6204,8 +6360,16 @@ void emscripten_mainloop(void)
+ #endif
+ 
+    if (ret != -1)
++   {
++#ifdef EMULATORJS
++      ejs_mainloop_end(callback_begin, false);
++#endif
+       return;
++   }
+ 
++#ifdef EMULATORJS
++   ejs_mainloop_end(callback_begin, false);
++#endif
+    main_exit(NULL);
+    emscripten_force_exit(0);
+ }
+@@ -6229,12 +6393,15 @@ char* get_memory_data(char* key) {
+       RARCH_LOG("Invalid memory type: %s\n", key);
+       return NULL;
+    }
+-   char state_data[300];
+-   memset(state_data, '\0', sizeof(state_data));
++   const size_t state_data_size = 300;
++   char* state_data = (char*)malloc(state_data_size);
++   if (!state_data)
++      return NULL;
++   memset(state_data, '\0', state_data_size);
+    
+    void* data = retro_get_memory_data(id);
+    size_t size = retro_get_memory_size(id);
+-   sprintf(state_data, "%zu|%zu", size, (unsigned long)data);
++   snprintf(state_data, state_data_size, "%zu|%zu", size, (unsigned long)data);
+    return state_data; // This must be freed by the JavaScript side!
+ }
+ 
+diff --git a/tasks/task_save.c b/tasks/task_save.c
+index 3014786..807c51b 100644
+--- a/tasks/task_save.c
++++ b/tasks/task_save.c
+@@ -1835,9 +1835,12 @@ void set_save_state_in_background(bool state)
+ 
+ char* save_state_info(void)
+ {
++   const size_t state_data_size = 300;
+    void* save_data = NULL;
+-   char state_data[300]; // This should NEVER overflow. If it does we are doing something very wrong.
+-   memset(state_data, '\0', sizeof(state_data));
++   char* state_data = (char*)malloc(state_data_size);
++   if (!state_data)
++      return NULL;
++   memset(state_data, '\0', state_data_size);
+ 
+    size_t serial_size;
+ 
+@@ -1857,7 +1860,7 @@ char* save_state_info(void)
+       strcpy(state_data, "Error writing data||0");
+       return state_data;
+    }
+-   sprintf(state_data, "%zu|%zu|1", serial_size, (unsigned long)save_data);
++   snprintf(state_data, state_data_size, "%zu|%zu|1", serial_size, (unsigned long)save_data);
+    return state_data; // This must be freed by the JavaScript side!
+ }
+ 

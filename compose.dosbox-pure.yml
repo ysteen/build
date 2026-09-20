@@ -8,4 +8,5 @@ services:
     volumes:
       - ./output:/build/output
       - ./compile:/build/compile
+      - ./patches:/build/patches:ro
       - ../dosbox-pure:/source/dosbox-pure

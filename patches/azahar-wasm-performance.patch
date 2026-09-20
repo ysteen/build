@@ -1,0 +1,4260 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index ffdd654..a4b3860 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -19,6 +19,13 @@ include(DownloadExternals)
+ include(CMakeDependentOption)
+ 
+ project(citra LANGUAGES C CXX ASM)
++
++if (EMSCRIPTEN)
++    # Some bundled projects cache BUILD_SHARED_LIBS=ON even though wasm does
++    # not support dynamic libraries. Reset it before configuring dependencies.
++    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build shared libraries" FORCE)
++endif()
++
+ # must be invoked after project() command when using CMAKE_TOOLCHAIN_FILE
+ include(FindPkgConfig)
+ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin" OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index d7ef6e9..aecff09 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -56,7 +56,11 @@
+ 
+ class CitraLibRetro {
+ public:
++#ifdef __EMSCRIPTEN__
++    CitraLibRetro() : log_filter(Common::Log::Level::Info) {}
++#else
+     CitraLibRetro() : log_filter(Common::Log::Level::Debug) {}
++#endif
+ 
+     Common::Log::Filter log_filter;
+     std::unique_ptr<EmuWindow_LibRetro> emu_window;
+@@ -243,6 +247,8 @@ void retro_run() {
+         return;
+     }
+ 
++    LibRetro::Telemetry::BeginRetroRun();
++
+     // Check to see if we actually have any config updates to process.
+     if (LibRetro::HasUpdatedConfig()) {
+         LibRetro::ParseCoreOptions();
+@@ -318,6 +324,8 @@ void retro_run() {
+             LibRetro::DisplayMessage(msg.c_str());
+         }
+     }
++
++    LibRetro::Telemetry::EndRetroRun();
+ }
+ 
+ static void setup_memory_maps() {
+diff --git a/src/citra_libretro/core_settings.cpp b/src/citra_libretro/core_settings.cpp
+index 86e7098..d38c529 100644
+--- a/src/citra_libretro/core_settings.cpp
++++ b/src/citra_libretro/core_settings.cpp
+@@ -47,6 +47,7 @@ static constexpr const char* input_type = "citra_input_type";
+ namespace graphics {
+ static constexpr const char* graphics_api = "citra_graphics_api";
+ static constexpr const char* use_hw_shader = "citra_use_hw_shaders";
++static constexpr const char* use_webgl_hw_draw = "citra_use_webgl_hw_draw";
+ static constexpr const char* use_shader_jit = "citra_use_shader_jit";
+ static constexpr const char* shaders_accurate_mul = "citra_use_acc_mul";
+ static constexpr const char* use_disk_shader_cache = "citra_use_hw_shader_cache";
+@@ -128,11 +129,18 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+     // CPU Category
+     {
+         config::cpu::use_cpu_jit,
++#ifdef __EMSCRIPTEN__
++        "Enable WebAssembly CPU Fast Paths",
++        "CPU Fast Paths",
++        "Enable the optimized WebAssembly ARM translator with persistent translated blocks, "
++        "fast block dispatch, and direct RAM access. Restart required.",
++#else
+         "Enable CPU JIT",
+         "CPU JIT",
+         "Enable Just-In-Time compilation for ARM CPU emulation. "
+         "Significantly improves performance but may reduce accuracy. "
+         "Restart required.",
++#endif
+         nullptr,
+         config::category::cpu,
+         {
+@@ -295,6 +303,23 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+         },
+         config::enabled
+     },
++#if defined(__EMSCRIPTEN__)
++    {
++        config::graphics::use_webgl_hw_draw,
++        "Experimental WebGL Hardware Draw",
++        "WebGL Hardware Draw",
++        "Run compatible PICA vertex batches on WebGL. This can improve draw-heavy scenes, but "
++        "ANGLE may compile many shader variants and stall or render incorrectly in some games.",
++        nullptr,
++        config::category::graphics,
++        {
++            { config::disabled, "Disabled (Recommended)" },
++            { config::enabled, "Enabled (Experimental)" },
++            { nullptr, nullptr }
++        },
++        config::disabled
++    },
++#endif
+     {
+         config::graphics::use_shader_jit,
+         "Enable Shader JIT",
+@@ -323,7 +348,11 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+             { config::disabled, "Disabled" },
+             { nullptr, nullptr }
+         },
++#if defined(__EMSCRIPTEN__)
++        config::disabled
++#else
+         config::enabled
++#endif
+     },
+     {
+         config::graphics::use_disk_shader_cache,
+@@ -558,7 +587,11 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+             { config::disabled, "Disabled" },
+             { nullptr, nullptr }
+         },
++#ifdef __EMSCRIPTEN__
++        config::enabled
++#else
+         config::disabled
++#endif
+     },
+     {
+         config::input::render_touchscreen,
+@@ -572,7 +605,11 @@ static constexpr retro_core_option_v2_definition option_definitions[] = {
+             { config::disabled, "Disabled" },
+             { nullptr, nullptr }
+         },
++#ifdef __EMSCRIPTEN__
++        config::enabled
++#else
+         config::disabled
++#endif
+     },
+     {
+         config::input::motion_enabled,
+@@ -857,6 +894,11 @@ static void ParseGraphicsOptions(void) {
+ 
+     Settings::values.use_hw_shader = LibRetro::FetchVariable(config::graphics::use_hw_shader,
+                                                              config::enabled) == config::enabled;
++#if defined(__EMSCRIPTEN__)
++    Settings::values.use_webgl_hw_draw =
++        LibRetro::FetchVariable(config::graphics::use_webgl_hw_draw, config::disabled) ==
++        config::enabled;
++#endif
+ 
+     Settings::values.use_shader_jit = LibRetro::FetchVariable(config::graphics::use_shader_jit,
+                                                               config::enabled) == config::enabled;
+@@ -866,7 +908,13 @@ static void ParseGraphicsOptions(void) {
+ #endif
+ 
+     Settings::values.shaders_accurate_mul =
+-        LibRetro::FetchVariable(config::graphics::shaders_accurate_mul, config::enabled) ==
++        LibRetro::FetchVariable(config::graphics::shaders_accurate_mul,
++#if defined(__EMSCRIPTEN__)
++                                config::disabled
++#else
++                                config::enabled
++#endif
++                                ) ==
+         config::enabled;
+ 
+     Settings::values.use_disk_shader_cache =
+@@ -974,8 +1022,13 @@ static void ParseInputOptions(void) {
+         config::enabled;
+ 
+     LibRetro::settings.render_touchscreen =
+-        LibRetro::FetchVariable(config::input::render_touchscreen, config::disabled) ==
+-        config::enabled;
++        LibRetro::FetchVariable(config::input::render_touchscreen,
++#ifdef __EMSCRIPTEN__
++                                config::enabled
++#else
++                                config::disabled
++#endif
++        ) == config::enabled;
+     LibRetro::settings.motion_enabled =
+         LibRetro::FetchVariable(config::input::motion_enabled, config::enabled) == config::enabled;
+     auto motion_sens = LibRetro::FetchVariable(config::input::motion_sensitivity, "1.0");
+diff --git a/src/citra_libretro/emu_window/libretro_window.cpp b/src/citra_libretro/emu_window/libretro_window.cpp
+index 0597862..dbe1a08 100644
+--- a/src/citra_libretro/emu_window/libretro_window.cpp
++++ b/src/citra_libretro/emu_window/libretro_window.cpp
+@@ -24,7 +24,8 @@
+ /// LibRetro expects a "default" GL state.
+ void ResetGLState() {
+     OpenGL::OpenGLState state{};
+-    state.Apply();
++    state.depth.test_enabled = true;
++    state.stencil.test_mask = 0xFFFFFFFF;
+ 
+ #if !defined(__EMSCRIPTEN__)
+     if (!Settings::values.use_gles) {
+@@ -49,6 +50,11 @@ void ResetGLState() {
+     glDisable(GL_DITHER);
+     glDisable(GL_CULL_FACE);
+     glCullFace(GL_BACK);
++
++    // The raw calls above are intentional because the libretro frontend can change GL behind the
++    // renderer's state tracker. Apply the matching tracked state afterwards so restoring the
++    // saved Azahar state compares against what is actually bound, not OpenGLState's defaults.
++    state.Apply();
+     glActiveTexture(GL_TEXTURE0);
+ }
+ #endif
+@@ -65,6 +71,13 @@ void EmuWindow_LibRetro::SwapBuffers() {
+         return;
+     submittedFrame = true;
+ 
++    const auto& telemetry_layout = GetFramebufferLayout();
++    LibRetro::Telemetry::OnVideoFrame(
++        static_cast<unsigned>(width), static_cast<unsigned>(height),
++        telemetry_layout.bottom_screen_enabled, telemetry_layout.bottom_screen.left,
++        telemetry_layout.bottom_screen.top, telemetry_layout.bottom_screen.right,
++        telemetry_layout.bottom_screen.bottom);
++
+     switch (Settings::values.graphics_api.GetValue()) {
+     case Settings::GraphicsAPI::OpenGL: {
+ #ifdef ENABLE_OPENGL
+diff --git a/src/citra_libretro/environment.cpp b/src/citra_libretro/environment.cpp
+index 04c7835..c124a5f 100644
+--- a/src/citra_libretro/environment.cpp
++++ b/src/citra_libretro/environment.cpp
+@@ -2,7 +2,15 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <algorithm>
++#include <array>
++#include <chrono>
+ #include <cstring>
++#include <limits>
++
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ 
+ #include "audio_core/audio_types.h"
+ #include "audio_core/libretro_sink.h"
+@@ -26,9 +34,282 @@ static retro_audio_sample_batch_t audio_batch_cb;
+ static retro_environment_t environ_cb;
+ static retro_input_poll_t input_poll_cb;
+ static retro_input_state_t input_state_cb;
++static std::array<unsigned, 4> controller_devices = {
++    RETRO_DEVICE_JOYPAD,
++    RETRO_DEVICE_JOYPAD,
++    RETRO_DEVICE_JOYPAD,
++    RETRO_DEVICE_JOYPAD,
++};
+ 
+ } // namespace
+ 
++namespace Telemetry {
++
++namespace {
++
++using Clock = std::chrono::steady_clock;
++
++struct State {
++    bool initialized = false;
++    bool run_active = false;
++    bool have_last_video = false;
++    Clock::time_point window_start{};
++    Clock::time_point run_start{};
++    Clock::time_point last_video{};
++    uint64_t frames = 0;
++    uint64_t frame_interval_us = 0;
++    uint64_t frame_intervals = 0;
++    uint64_t frame_interval_max_us = 0;
++    std::array<uint64_t, 8> frame_time_buckets{};
++    uint64_t core_runs = 0;
++    uint64_t core_run_us = 0;
++    uint64_t core_run_max_us = 0;
++    uint64_t video_submits = 0;
++    uint64_t video_submit_us = 0;
++    uint64_t video_submit_max_us = 0;
++    uint64_t audio_frames = 0;
++    uint64_t input_polls = 0;
++    unsigned width = 0;
++    unsigned height = 0;
++    bool bottom_screen_enabled = false;
++    unsigned bottom_left = 0;
++    unsigned bottom_top = 0;
++    unsigned bottom_right = 0;
++    unsigned bottom_bottom = 0;
++};
++
++State telemetry;
++
++void EnsureWindow() {
++    if (telemetry.initialized)
++        return;
++
++    const auto now = Clock::now();
++    telemetry.initialized = true;
++    telemetry.window_start = now;
++}
++
++unsigned ToUnsigned(uint64_t value) {
++    return static_cast<unsigned>(std::min<uint64_t>(
++        value, std::numeric_limits<unsigned>::max()));
++}
++
++unsigned AverageMicroseconds(uint64_t total, uint64_t count) {
++    return count == 0 ? 0 : ToUnsigned(total / count);
++}
++
++unsigned FrameTimePercentileMs(unsigned percentile) {
++    static constexpr std::array<unsigned, 7> bucket_limits_ms = {
++        8, 16, 20, 25, 33, 50, 100,
++    };
++    if (telemetry.frame_intervals == 0)
++        return 0;
++
++    const uint64_t target = std::max<uint64_t>(
++        1, (telemetry.frame_intervals * percentile + 99) / 100);
++    uint64_t observed = 0;
++    for (std::size_t bucket = 0; bucket < telemetry.frame_time_buckets.size(); ++bucket) {
++        observed += telemetry.frame_time_buckets[bucket];
++        if (observed >= target) {
++            return bucket < bucket_limits_ms.size() ? bucket_limits_ms[bucket] : 101;
++        }
++    }
++    return 101;
++}
++
++void PublishIfReady() {
++    EnsureWindow();
++    const auto now = Clock::now();
++    const auto elapsed_ms = static_cast<uint64_t>(
++        std::chrono::duration_cast<std::chrono::milliseconds>(now - telemetry.window_start)
++            .count());
++    if (elapsed_ms < 1000)
++        return;
++
++#ifdef __EMSCRIPTEN__
++    const auto core_perf = Core::System::GetInstance().GetAndResetPerfStats();
++    const std::array<double, 9> core_perf_values = {
++        core_perf.system_fps,
++        core_perf.game_fps,
++        core_perf.emulation_speed,
++        core_perf.time_vblank_interval * 1000.0,
++        core_perf.time_hle_svc * 1000.0,
++        core_perf.time_hle_ipc * 1000.0,
++        core_perf.time_gpu * 1000.0,
++        core_perf.time_swap * 1000.0,
++        core_perf.time_remaining * 1000.0,
++    };
++    const unsigned elapsed = ToUnsigned(elapsed_ms);
++    const unsigned frames = ToUnsigned(telemetry.frames);
++    const unsigned frame_avg_us =
++        AverageMicroseconds(telemetry.frame_interval_us, telemetry.frame_intervals);
++    const unsigned frame_max_us = ToUnsigned(telemetry.frame_interval_max_us);
++    const unsigned frame_p50_ms = FrameTimePercentileMs(50);
++    const unsigned frame_p95_ms = FrameTimePercentileMs(95);
++    const unsigned core_avg_us =
++        AverageMicroseconds(telemetry.core_run_us, telemetry.core_runs);
++    const unsigned core_max_us = ToUnsigned(telemetry.core_run_max_us);
++    const unsigned video_avg_us =
++        AverageMicroseconds(telemetry.video_submit_us, telemetry.video_submits);
++    const unsigned video_max_us = ToUnsigned(telemetry.video_submit_max_us);
++    const unsigned audio_frames = ToUnsigned(telemetry.audio_frames);
++    const unsigned input_polls = ToUnsigned(telemetry.input_polls);
++    // Emscripten's EM_ASM bridge exposes at most 16 positional arguments
++    // ($0 through $15). Pack the layout values so the telemetry callback
++    // cannot emit an invalid JavaScript reference such as `$16`.
++    const unsigned layout_wh = telemetry.width | (telemetry.height << 16);
++    const unsigned bottom_enabled = telemetry.bottom_screen_enabled ? 1 : 0;
++    const unsigned bottom_left_top = telemetry.bottom_left | (telemetry.bottom_top << 16);
++    const unsigned bottom_right_bottom =
++        telemetry.bottom_right | (telemetry.bottom_bottom << 16);
++
++    EM_ASM(({
++        const elapsedMs = $0;
++        const sample = {
++            at: Date.now(),
++            elapsedMs,
++            fps: elapsedMs > 0 ? ($1 * 1000) / elapsedMs : 0,
++            frameTimeMs: $2 / 1000,
++            frameTimeMaxMs: $3 / 1000,
++            frameTimeP50Ms: $4,
++            frameTimeP95Ms: $5,
++            coreRunMs: $6 / 1000,
++            coreRunMaxMs: $7 / 1000,
++            videoSubmitMs: $8 / 1000,
++            videoSubmitMaxMs: $9 / 1000,
++            audioFrames: $10,
++            inputPolls: $11,
++            layout: {
++                width: $12 & 0xffff,
++                height: $12 >>> 16,
++                bottomScreenEnabled: !!$14,
++                bottom: {
++                    left: $13 & 0xffff,
++                    top: $13 >>> 16,
++                    right: $15 & 0xffff,
++                    bottom: $15 >>> 16
++                }
++            }
++        };
++        globalThis.__AZAHAR_PERF__ = sample;
++    }), elapsed, frames, frame_avg_us, frame_max_us, frame_p50_ms, frame_p95_ms,
++       core_avg_us, core_max_us, video_avg_us, video_max_us, audio_frames,
++       input_polls, layout_wh, bottom_left_top, bottom_enabled, bottom_right_bottom);
++
++    EM_ASM(({
++        const base = $0 >>> 3;
++        const sample = globalThis.__AZAHAR_PERF__;
++        sample.systemFps = HEAPF64[base];
++        sample.gameFps = HEAPF64[base + 1];
++        sample.emulationSpeed = HEAPF64[base + 2];
++        sample.vblankMs = HEAPF64[base + 3];
++        sample.hleSvcMs = HEAPF64[base + 4];
++        sample.hleIpcMs = HEAPF64[base + 5];
++        sample.gpuMs = HEAPF64[base + 6];
++        sample.swapMs = HEAPF64[base + 7];
++        sample.remainingMs = HEAPF64[base + 8];
++        if (typeof globalThis.__reportBrowserLog === "function")
++            globalThis.__reportBrowserLog("azahar-perf", sample);
++    }), core_perf_values.data());
++#endif
++
++    telemetry.window_start = now;
++    telemetry.frames = 0;
++    telemetry.frame_interval_us = 0;
++    telemetry.frame_intervals = 0;
++    telemetry.frame_interval_max_us = 0;
++    telemetry.frame_time_buckets.fill(0);
++    telemetry.core_runs = 0;
++    telemetry.core_run_us = 0;
++    telemetry.core_run_max_us = 0;
++    telemetry.video_submits = 0;
++    telemetry.video_submit_us = 0;
++    telemetry.video_submit_max_us = 0;
++    telemetry.audio_frames = 0;
++    telemetry.input_polls = 0;
++}
++
++} // namespace
++
++void BeginRetroRun() {
++    EnsureWindow();
++    telemetry.run_start = Clock::now();
++    telemetry.run_active = true;
++}
++
++void EndRetroRun() {
++    EnsureWindow();
++    if (telemetry.run_active) {
++        const auto duration_us = static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - telemetry.run_start)
++                .count());
++        telemetry.core_runs++;
++        telemetry.core_run_us += duration_us;
++        telemetry.core_run_max_us = std::max(telemetry.core_run_max_us, duration_us);
++        telemetry.run_active = false;
++    }
++    PublishIfReady();
++}
++
++void OnVideoFrame(unsigned frame_width, unsigned frame_height, bool bottom_enabled,
++                  unsigned bottom_left, unsigned bottom_top, unsigned bottom_right,
++                  unsigned bottom_bottom) {
++    EnsureWindow();
++    const auto now = Clock::now();
++    if (telemetry.have_last_video) {
++        const auto interval_us = static_cast<uint64_t>(
++            std::chrono::duration_cast<std::chrono::microseconds>(now - telemetry.last_video)
++                .count());
++        telemetry.frame_interval_us += interval_us;
++        telemetry.frame_interval_max_us =
++            std::max(telemetry.frame_interval_max_us, interval_us);
++        telemetry.frame_intervals++;
++        const std::size_t bucket = interval_us <= 8000
++                                       ? 0
++                                       : interval_us <= 16000
++                                             ? 1
++                                             : interval_us <= 20000
++                                                   ? 2
++                                                   : interval_us <= 25000
++                                                         ? 3
++                                                         : interval_us <= 33000
++                                                               ? 4
++                                                               : interval_us <= 50000
++                                                                     ? 5
++                                                                     : interval_us <= 100000 ? 6 : 7;
++        telemetry.frame_time_buckets[bucket]++;
++    }
++    telemetry.have_last_video = true;
++    telemetry.last_video = now;
++    telemetry.frames++;
++    telemetry.width = frame_width;
++    telemetry.height = frame_height;
++    telemetry.bottom_screen_enabled = bottom_enabled;
++    telemetry.bottom_left = bottom_left;
++    telemetry.bottom_top = bottom_top;
++    telemetry.bottom_right = bottom_right;
++    telemetry.bottom_bottom = bottom_bottom;
++}
++
++void OnVideoSubmit(std::uint64_t duration_us) {
++    EnsureWindow();
++    telemetry.video_submits++;
++    telemetry.video_submit_us += duration_us;
++    telemetry.video_submit_max_us = std::max(telemetry.video_submit_max_us, duration_us);
++}
++
++void OnAudioFrames(size_t frames) {
++    EnsureWindow();
++    telemetry.audio_frames += frames;
++}
++
++void OnInputPoll() {
++    EnsureWindow();
++    telemetry.input_polls++;
++}
++
++} // namespace Telemetry
++
+ bool GetSoftwareFramebuffer(retro_framebuffer* fb, int width, int height) {
+     fb->data = nullptr;
+     fb->width = width;
+@@ -41,7 +322,12 @@ bool GetSoftwareFramebuffer(retro_framebuffer* fb, int width, int height) {
+ }
+ 
+ void UploadVideoFrame(const void* data, unsigned width, unsigned height, size_t pitch) {
+-    return video_cb(data, width, height, pitch);
++    const auto start = std::chrono::steady_clock::now();
++    video_cb(data, width, height, pitch);
++    Telemetry::OnVideoSubmit(static_cast<std::uint64_t>(
++        std::chrono::duration_cast<std::chrono::microseconds>(
++            std::chrono::steady_clock::now() - start)
++            .count()));
+ }
+ 
+ bool SetHWSharedContext() {
+@@ -49,6 +335,7 @@ bool SetHWSharedContext() {
+ }
+ 
+ void PollInput() {
++    Telemetry::OnInputPoll();
+     return input_poll_cb();
+ }
+ 
+@@ -236,6 +523,7 @@ void retro_get_system_info(struct retro_system_info* info) {
+ }
+ 
+ void LibRetro::SubmitAudio(const int16_t* data, size_t frames) {
++    Telemetry::OnAudioFrames(frames);
+     audio_batch_cb(data, frames);
+ }
+ 
+@@ -259,7 +547,21 @@ void retro_set_environment(retro_environment_t cb) {
+     LibRetro::OnConfigureEnvironment();
+ }
+ 
+-void retro_set_controller_port_device(unsigned port, unsigned device) {}
++void retro_set_controller_port_device(unsigned port, unsigned device) {
++    if (port >= LibRetro::controller_devices.size()) {
++        LOG_WARNING(Frontend, "Ignoring controller device {} for invalid port {}", device, port);
++        return;
++    }
++
++    LibRetro::controller_devices[port] = device;
++    if ((device & 0xffu) != RETRO_DEVICE_JOYPAD) {
++        LOG_WARNING(Frontend,
++                    "Controller port {} selected device {} (Azahar expects RETRO_DEVICE_JOYPAD)",
++                    port, device);
++    } else {
++        LOG_INFO(Frontend, "Controller port {} selected device {}", port, device);
++    }
++}
+ 
+ void retro_set_input_state(retro_input_state_t cb) {
+     input_state_cb = cb;
+@@ -274,8 +576,20 @@ void retro_get_system_av_info(struct retro_system_av_info* info) {
+     auto geom = ComputeLayoutGeometry();
+     info->geometry.base_width = geom.width;
+     info->geometry.base_height = geom.height;
++#ifdef __EMSCRIPTEN__
++    // RetroArch allocates software conversion textures from these maxima even
++    // for a hardware-rendered core. Advertising Azahar's theoretical 10x
++    // layout makes the WebAssembly frontend allocate two 8192x8192 buffers
++    // before the GL context can start. A maximum equal to the boot geometry,
++    // however, forces RetroArch to recreate the WebGL context when a game
++    // switches layout. 4096 keeps the allocation bounded while covering the
++    // normal browser viewport and practical 3DS resolution factors.
++    info->geometry.max_width = 4096;
++    info->geometry.max_height = 4096;
++#else
+     // Max must cover the largest possible layout (SideScreen at 10x = 7200).
+     info->geometry.max_width = (Core::kScreenBottomWidth + Core::kScreenTopWidth) * 10;
+     info->geometry.max_height = (Core::kScreenTopHeight + Core::kScreenBottomHeight) * 10;
++#endif
+     info->geometry.aspect_ratio = (float)geom.width / (float)geom.height;
+ }
+diff --git a/src/citra_libretro/environment.h b/src/citra_libretro/environment.h
+index 2b84d8b..bfde637 100644
+--- a/src/citra_libretro/environment.h
++++ b/src/citra_libretro/environment.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <cstddef>
+ #include <cstdint>
+ #include "common/logging/backend.h"
+ #include "common/logging/filter.h"
+@@ -28,6 +29,22 @@ void UploadVideoFrame(const void* data, unsigned width, unsigned height, size_t
+ /// @see retro_input_poll_t
+ void PollInput();
+ 
++namespace Telemetry {
++
++/// Starts and finishes one libretro run-loop invocation.
++void BeginRetroRun();
++void EndRetroRun();
++
++/// Records low-frequency performance inputs without logging every frame.
++void OnVideoFrame(unsigned width, unsigned height, bool bottom_screen_enabled,
++                  unsigned bottom_left, unsigned bottom_top, unsigned bottom_right,
++                  unsigned bottom_bottom);
++void OnVideoSubmit(std::uint64_t duration_us);
++void OnAudioFrames(size_t frames);
++void OnInputPoll();
++
++} // namespace Telemetry
++
+ /// Gets the sensor interface for motion input
+ bool GetSensorInterface(struct retro_sensor_interface* sensor_interface);
+ 
+diff --git a/src/citra_libretro/input/mouse_tracker.cpp b/src/citra_libretro/input/mouse_tracker.cpp
+index 6829aad..6b54145 100644
+--- a/src/citra_libretro/input/mouse_tracker.cpp
++++ b/src/citra_libretro/input/mouse_tracker.cpp
+@@ -130,58 +130,51 @@ void MouseTracker::Update(int bufferWidth, int bufferHeight,
+                           const Layout::FramebufferLayout& layout) {
+     bool state = false;
+ 
++    // RetroArch reports pointer coordinates in the full framebuffer. The
++    // browser input driver maps CSS coordinates through the actual canvas
++    // content rectangle, so the conversion below is intentionally based on
++    // the complete 16-bit range and never assumes that the canvas is square.
++    auto update_pointer = [&](bool pressed) {
++        const auto pointerX = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0,
++                                                   RETRO_DEVICE_ID_POINTER_X);
++        const auto pointerY = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0,
++                                                   RETRO_DEVICE_ID_POINTER_Y);
++        const auto to_framebuffer = [](int16_t value, int size) {
++            const float normalized =
++                (static_cast<float>(value) + 0x7fff) / static_cast<float>(0xffff);
++            return std::clamp(static_cast<int>(normalized * size), 0, std::max(0, size - 1));
++        };
++        const auto newX = to_framebuffer(pointerX, bufferWidth);
++        const auto newY = to_framebuffer(pointerY, bufferHeight);
++
++        lastMouseX = static_cast<float>(newX);
++        lastMouseY = static_cast<float>(newY);
++
++        if (!IsWithinTouchscreen(layout, static_cast<unsigned>(newX),
++                                 static_cast<unsigned>(newY)))
++            return;
++
++        x = std::clamp(newX, static_cast<int>(layout.bottom_screen.left),
++                       static_cast<int>(layout.bottom_screen.right) - 1) -
++            static_cast<int>(layout.bottom_screen.left);
++        y = std::clamp(newY, static_cast<int>(layout.bottom_screen.top),
++                       static_cast<int>(layout.bottom_screen.bottom) - 1) -
++            static_cast<int>(layout.bottom_screen.top);
++        state |= pressed;
++    };
++
+     if (LibRetro::settings.mouse_touchscreen) {
+         // Check mouse input
+-        state |= LibRetro::CheckInput(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT);
+-
+-        // Read in and convert pointer values to absolute values on the canvas
+-        auto pointerX = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+-        auto pointerY = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+-        auto newX = static_cast<int>((pointerX + 0x7fff) / (float)(0x7fff * 2) * bufferWidth);
+-        auto newY = static_cast<int>((pointerY + 0x7fff) / (float)(0x7fff * 2) * bufferHeight);
+-
+-        // Use mouse pointer movement
+-        if ((pointerX != 0 || pointerY != 0) && (newX != lastMouseX || newY != lastMouseY)) {
+-            lastMouseX = newX;
+-            lastMouseY = newY;
+-
+-            // Use layout system to validate and map coordinates
+-            if (IsWithinTouchscreen(layout, newX, newY)) {
+-                x = std::clamp(newX, static_cast<int>(layout.bottom_screen.left),
+-                               static_cast<int>(layout.bottom_screen.right)) -
+-                    layout.bottom_screen.left;
+-                y = std::clamp(newY, static_cast<int>(layout.bottom_screen.top),
+-                               static_cast<int>(layout.bottom_screen.bottom)) -
+-                    layout.bottom_screen.top;
+-            }
+-        }
++        const bool pressed =
++            LibRetro::CheckInput(0, RETRO_DEVICE_MOUSE, 0, RETRO_DEVICE_ID_MOUSE_LEFT);
++        update_pointer(pressed);
+     }
+ 
+     if (LibRetro::settings.touch_touchscreen) {
+         // Check touchscreen input
+-        state |= LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_PRESSED);
+-
+-        // Read in and convert pointer values to absolute values on the canvas
+-        auto pointerX = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+-        auto pointerY = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+-        auto newX = static_cast<int>((pointerX + 0x7fff) / (float)(0x7fff * 2) * bufferWidth);
+-        auto newY = static_cast<int>((pointerY + 0x7fff) / (float)(0x7fff * 2) * bufferHeight);
+-
+-        // Use mouse pointer movement
+-        if ((pointerX != 0 || pointerY != 0) && (newX != lastMouseX || newY != lastMouseY)) {
+-            lastMouseX = newX;
+-            lastMouseY = newY;
+-
+-            // Use layout system to validate and map coordinates
+-            if (IsWithinTouchscreen(layout, newX, newY)) {
+-                x = std::clamp(newX, static_cast<int>(layout.bottom_screen.left),
+-                               static_cast<int>(layout.bottom_screen.right)) -
+-                    layout.bottom_screen.left;
+-                y = std::clamp(newY, static_cast<int>(layout.bottom_screen.top),
+-                               static_cast<int>(layout.bottom_screen.bottom)) -
+-                    layout.bottom_screen.top;
+-            }
+-        }
++        const bool pressed = LibRetro::CheckInput(0, RETRO_DEVICE_POINTER, 0,
++                                                  RETRO_DEVICE_ID_POINTER_PRESSED);
++        update_pointer(pressed);
+     }
+ 
+     if (LibRetro::settings.analog_function != LibRetro::CStickFunction::CStick) {
+diff --git a/src/citra_libretro/input/mouse_tracker.h b/src/citra_libretro/input/mouse_tracker.h
+index 3f44357..bcf53d0 100644
+--- a/src/citra_libretro/input/mouse_tracker.h
++++ b/src/citra_libretro/input/mouse_tracker.h
+@@ -54,17 +54,17 @@ public:
+     }
+ 
+ private:
+-    int x;
+-    int y;
++    int x = 0;
++    int y = 0;
+ 
+-    float lastMouseX;
+-    float lastMouseY;
++    float lastMouseX = -1.0f;
++    float lastMouseY = -1.0f;
+ 
+-    float projectedX;
+-    float projectedY;
+-    float renderRatio;
++    float projectedX = 0.0f;
++    float projectedY = 0.0f;
++    float renderRatio = 0.0f;
+ 
+-    bool isPressed;
++    bool isPressed = false;
+ 
+     Layout::FramebufferLayout framebuffer_layout;
+     std::unique_ptr<CursorRenderer> cursor_renderer;
+diff --git a/src/common/settings.cpp b/src/common/settings.cpp
+index 564090d..153e741 100644
+--- a/src/common/settings.cpp
++++ b/src/common/settings.cpp
+@@ -94,6 +94,7 @@ void LogSettings() {
+     log_setting("Renderer_DisableSpirvOptimizer", values.disable_spirv_optimizer.GetValue());
+     log_setting("Renderer_Debug", values.renderer_debug.GetValue());
+     log_setting("Renderer_UseHwShader", values.use_hw_shader.GetValue());
++    log_setting("Renderer_UseWebGLHwDraw", values.use_webgl_hw_draw.GetValue());
+     log_setting("Renderer_ShadersAccurateMul", values.shaders_accurate_mul.GetValue());
+     log_setting("Renderer_UseShaderJit", values.use_shader_jit.GetValue());
+     log_setting("Renderer_UseResolutionFactor", values.resolution_factor.GetValue());
+diff --git a/src/common/settings.h b/src/common/settings.h
+index 709ba0c..08fcd96 100644
+--- a/src/common/settings.h
++++ b/src/common/settings.h
+@@ -513,6 +513,7 @@ struct Values {
+     SwitchableSetting<bool> async_shader_compilation{false, "async_shader_compilation"};
+     SwitchableSetting<bool> async_presentation{true, "async_presentation"};
+     SwitchableSetting<bool> use_hw_shader{true, "use_hw_shader"};
++    SwitchableSetting<bool> use_webgl_hw_draw{false, "use_webgl_hw_draw"};
+     SwitchableSetting<bool> use_disk_shader_cache{true, "use_disk_shader_cache"};
+     SwitchableSetting<bool> shaders_accurate_mul{true, "shaders_accurate_mul"};
+ #ifdef ANDROID // TODO: Fuck this -OS
+diff --git a/src/core/arm/dyncom/arm_dyncom.cpp b/src/core/arm/dyncom/arm_dyncom.cpp
+index c9bb66e..c5e895b 100644
+--- a/src/core/arm/dyncom/arm_dyncom.cpp
++++ b/src/core/arm/dyncom/arm_dyncom.cpp
+@@ -5,23 +5,70 @@
+ #include <algorithm>
+ #include <cstring>
+ #include <memory>
++#include <vector>
+ #include "core/arm/dyncom/arm_dyncom.h"
+ #include "core/arm/dyncom/arm_dyncom_interpreter.h"
+ #include "core/arm/dyncom/arm_dyncom_trans.h"
+ #include "core/arm/skyeye_common/armstate.h"
+ #include "core/core.h"
+ #include "core/core_timing.h"
++#include "core/memory.h"
++
++namespace {
++
++std::vector<ARMul_State*>& DynComStates() {
++    static std::vector<ARMul_State*> states;
++    return states;
++}
++
++void RegisterDynComState(ARMul_State* state) {
++    DynComStates().push_back(state);
++}
++
++void UnregisterDynComState(ARMul_State* state) {
++    auto& states = DynComStates();
++    states.erase(std::remove(states.begin(), states.end(), state), states.end());
++}
++
++void ResetTranslationArenaIfUnused() {
++    const auto& states = DynComStates();
++    if (std::all_of(states.begin(), states.end(),
++                    [](const ARMul_State* state) { return state->instruction_cache.empty(); })) {
++        trans_cache_buf_top = 0;
++    }
++}
++
++} // namespace
+ 
+ namespace Core {
+ 
++void ResetAllDynComInstructionCaches() {
++    for (ARMul_State* state : DynComStates()) {
++        state->instruction_cache.clear();
++#ifdef __EMSCRIPTEN__
++        state->ClearFastInstructionCache();
++#endif
++    }
++    trans_cache_buf_top = 0;
++}
++
+ ARM_DynCom::ARM_DynCom(Core::System& system_, Memory::MemorySystem& memory,
+                        PrivilegeMode initial_mode, u32 id,
+-                       std::shared_ptr<Core::Timing::Timer> timer)
++                       std::shared_ptr<Core::Timing::Timer> timer, bool enable_wasm_fast_paths)
+     : ARM_Interface(id, timer), system(system_) {
+     state = std::make_unique<ARMul_State>(system, memory, initial_mode);
++#ifdef __EMSCRIPTEN__
++    state->enable_wasm_fast_paths = enable_wasm_fast_paths;
++#else
++    (void)enable_wasm_fast_paths;
++#endif
++    RegisterDynComState(state.get());
+ }
+ 
+-ARM_DynCom::~ARM_DynCom() {}
++ARM_DynCom::~ARM_DynCom() {
++    UnregisterDynComState(state.get());
++    ResetTranslationArenaIfUnused();
++}
+ 
+ void ARM_DynCom::Run() {
+     ExecuteInstructions(std::max<s64>(timer->GetDowncount(), 0));
+@@ -33,7 +80,12 @@ void ARM_DynCom::Step() {
+ 
+ void ARM_DynCom::ClearInstructionCache() {
+     state->instruction_cache.clear();
+-    trans_cache_buf_top = 0;
++#ifdef __EMSCRIPTEN__
++    state->ClearFastInstructionCache();
++#endif
++    // The translation arena is shared by every emulated core. Reclaim it only after all per-core
++    // offset maps have been invalidated, otherwise another core would retain stale offsets.
++    ResetTranslationArenaIfUnused();
+ }
+ 
+ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+@@ -41,11 +93,22 @@ void ARM_DynCom::InvalidateCacheRange(u32, std::size_t) {
+ }
+ 
+ void ARM_DynCom::SetPageTable(const std::shared_ptr<Memory::PageTable>& page_table) {
++    if (current_page_table == page_table) {
++        return;
++    }
++
++    current_page_table = page_table;
++#ifdef __EMSCRIPTEN__
++    state->fastmem_page_table =
++        state->enable_wasm_fast_paths && current_page_table
++            ? current_page_table->GetPointerArray().data()
++            : nullptr;
++#endif
+     ClearInstructionCache();
+ }
+ 
+ std::shared_ptr<Memory::PageTable> ARM_DynCom::GetPageTable() const {
+-    return nullptr;
++    return current_page_table;
+ }
+ 
+ void ARM_DynCom::SetPC(u32 pc) {
+diff --git a/src/core/arm/dyncom/arm_dyncom.h b/src/core/arm/dyncom/arm_dyncom.h
+index 3fd3798..3adbce3 100644
+--- a/src/core/arm/dyncom/arm_dyncom.h
++++ b/src/core/arm/dyncom/arm_dyncom.h
+@@ -18,11 +18,14 @@ namespace Core {
+ 
+ class System;
+ 
++void ResetAllDynComInstructionCaches();
++
+ class ARM_DynCom final : public ARM_Interface {
+ public:
+     explicit ARM_DynCom(Core::System& system, Memory::MemorySystem& memory,
+                         PrivilegeMode initial_mode, u32 id,
+-                        std::shared_ptr<Core::Timing::Timer> timer);
++                        std::shared_ptr<Core::Timing::Timer> timer,
++                        bool enable_wasm_fast_paths = true);
+     ~ARM_DynCom() override;
+ 
+     void Run() override;
+@@ -59,6 +62,7 @@ private:
+ 
+     Core::System& system;
+     std::unique_ptr<ARMul_State> state;
++    std::shared_ptr<Memory::PageTable> current_page_table;
+ };
+ 
+ } // namespace Core
+diff --git a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
+index 862c422..ff02c43 100644
+--- a/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
++++ b/src/core/arm/dyncom/arm_dyncom_interpreter.cpp
+@@ -9,6 +9,7 @@
+ #include "common/common_types.h"
+ #include "common/logging/log.h"
+ #include "common/microprofile.h"
++#include "core/arm/dyncom/arm_dyncom.h"
+ #include "core/arm/dyncom/arm_dyncom_dec.h"
+ #include "core/arm/dyncom/arm_dyncom_interpreter.h"
+ #include "core/arm/dyncom/arm_dyncom_run.h"
+@@ -752,6 +753,29 @@ get_addr_fp_t GetAddressingOpLoadStoreT(unsigned int inst) {
+     return nullptr;
+ }
+ 
++static inline void ResolveAddressingOp(ARMul_State* cpu, const ldst_inst* instruction,
++                                       unsigned int& virtual_address) {
++#ifdef __EMSCRIPTEN__
++    // Most ARM loads and stores use one of these immediate addressing modes. Calling an
++    // addressing helper through a function pointer becomes call_indirect in WebAssembly, which is
++    // noticeably more expensive in this interpreter hot path. Keep the less common register and
++    // multiple-transfer modes on the existing generic path.
++    if (instruction->get_addr == LnSWoUB(ImmediateOffset)) {
++        LnSWoUB(ImmediateOffset)(cpu, instruction->inst, virtual_address);
++        return;
++    }
++    if (instruction->get_addr == LnSWoUB(ImmediatePreIndexed)) {
++        LnSWoUB(ImmediatePreIndexed)(cpu, instruction->inst, virtual_address);
++        return;
++    }
++    if (instruction->get_addr == LnSWoUB(ImmediatePostIndexed)) {
++        LnSWoUB(ImmediatePostIndexed)(cpu, instruction->inst, virtual_address);
++        return;
++    }
++#endif
++    instruction->get_addr(cpu, instruction->inst, virtual_address);
++}
++
+ enum { FETCH_SUCCESS, FETCH_FAILURE };
+ 
+ static ThumbDecodeStatus DecodeThumbInstruction(u32 inst, u32 addr, u32* arm_inst, u32* inst_size,
+@@ -839,6 +863,49 @@ static unsigned int InterpreterTranslateInstruction(const ARMul_State* cpu, cons
+     return inst_size;
+ }
+ 
++static void CacheTranslatedBlock(ARMul_State* cpu, u32 pc, std::size_t offset) {
++    cpu->instruction_cache[pc] = offset;
++#ifdef __EMSCRIPTEN__
++    if (cpu->enable_wasm_fast_paths) {
++        cpu->StoreFastInstructionCache(pc, offset);
++    }
++#endif
++}
++
++static bool LookupTranslatedBlock(ARMul_State* cpu, u32 pc, std::size_t& offset) {
++#ifdef __EMSCRIPTEN__
++    if (cpu->enable_wasm_fast_paths && cpu->LookupFastInstructionCache(pc, offset) &&
++        offset < trans_cache_buf_top) {
++        return true;
++    }
++#endif
++
++    const auto iter = cpu->instruction_cache.find(pc);
++    if (iter == cpu->instruction_cache.end() || iter->second >= trans_cache_buf_top) {
++        if (iter != cpu->instruction_cache.end()) {
++            cpu->instruction_cache.erase(iter);
++        }
++        return false;
++    }
++
++    offset = iter->second;
++#ifdef __EMSCRIPTEN__
++    if (cpu->enable_wasm_fast_paths) {
++        cpu->StoreFastInstructionCache(pc, offset);
++    }
++#endif
++    return true;
++}
++
++static void EnsureTranslationCacheCapacity() {
++    // A block cannot cross a 4 KiB guest page, so this leaves ample room for the largest possible
++    // translated block and resets only at a dispatcher boundary where no cached pointer is live.
++    constexpr std::size_t translation_cache_headroom = 1024 * 1024;
++    if (trans_cache_buf_top >= TRANS_CACHE_SIZE - translation_cache_headroom) {
++        Core::ResetAllDynComInstructionCaches();
++    }
++}
++
+ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
+     MICROPROFILE_SCOPE(DynCom_Decode);
+ 
+@@ -846,6 +913,8 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+     // Allocate memory and init InsCream
+     // Go on next, until terminal instruction
+     // Save start addr of basicblock in CreamCache
++    EnsureTranslationCacheCapacity();
++
+     ARM_INST_PTR inst_base = nullptr;
+     TransExtData ret = TransExtData::NON_BRANCH;
+     bb_start = trans_cache_buf_top;
+@@ -863,7 +932,7 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+         ret = inst_base->br;
+     };
+ 
+-    cpu->instruction_cache[pc_start] = bb_start;
++    CacheTranslatedBlock(cpu, pc_start, bb_start);
+ 
+     return KEEP_GOING;
+ }
+@@ -871,6 +940,8 @@ static int InterpreterTranslateBlock(ARMul_State* cpu, std::size_t& bb_start, u3
+ static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u32 addr) {
+     MICROPROFILE_SCOPE(DynCom_Decode);
+ 
++    EnsureTranslationCacheCapacity();
++
+     ARM_INST_PTR inst_base = nullptr;
+     bb_start = trans_cache_buf_top;
+ 
+@@ -883,7 +954,7 @@ static int InterpreterTranslateSingle(ARMul_State* cpu, std::size_t& bb_start, u
+         inst_base->br = TransExtData::SINGLE_STEP;
+     }
+ 
+-    cpu->instruction_cache[pc_start] = bb_start;
++    CacheTranslatedBlock(cpu, pc_start, bb_start);
+ 
+     return KEEP_GOING;
+ }
+@@ -938,7 +1009,12 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+ #define RDLO cpu->Reg[inst_cream->RdLo]
+ #define LINK_RTN_ADDR (cpu->Reg[14] = cpu->Reg[15] + 4)
+ #define SET_PC (cpu->Reg[15] = cpu->Reg[15] + 8 + inst_cream->signed_immed_24)
+-#define SHIFTER_OPERAND inst_cream->shtop_func(cpu, inst_cream->shifter_operand)
++#define SHIFTER_OPERAND                                                                            \
++    (inst_cream->I                                                                                \
++         ? (cpu->shifter_carry_out =                                                             \
++                inst_cream->I == 1 ? cpu->CFlag : BIT(inst_cream->shifter_operand, 31),            \
++            inst_cream->shifter_operand)                                                          \
++         : inst_cream->shtop_func(cpu, inst_cream->shifter_operand))
+ 
+ #define FETCH_INST                                                                                 \
+     if (inst_base->br != TransExtData::NON_BRANCH)                                                 \
+@@ -948,7 +1024,7 @@ unsigned InterpreterMainLoop(ARMul_State* cpu) {
+ #define INC_PC(l) ptr += sizeof(arm_inst) + l
+ #define INC_PC_STUB ptr += sizeof(arm_inst)
+ 
+-#ifdef ANDROID
++#if defined(ANDROID) || defined(__EMSCRIPTEN__)
+ #define GDB_BP_CHECK
+ #else
+ #define GDB_BP_CHECK                                                                               \
+@@ -1639,19 +1715,19 @@ DISPATCH: {
+     else
+         cpu->Reg[15] &= 0xfffffffc;
+ 
+-    // Find the cached instruction cream, otherwise translate it...
+-    auto itr = cpu->instruction_cache.find(cpu->Reg[15]);
+-    if (itr != cpu->instruction_cache.end()) {
+-        ptr = itr->second;
+-    } else if (cpu->NumInstrsToExecute != 1) {
+-        if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+-            goto END;
+-    } else {
+-        if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
+-            goto END;
++    // Find the cached translated block, otherwise translate it. WebAssembly builds use a compact
++    // direct-mapped cache before falling back to unordered_map for collision-safe lookup.
++    if (!LookupTranslatedBlock(cpu, cpu->Reg[15], ptr)) {
++        if (cpu->NumInstrsToExecute != 1) {
++            if (InterpreterTranslateBlock(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
++                goto END;
++        } else {
++            if (InterpreterTranslateSingle(cpu, ptr, cpu->Reg[15]) == FETCH_EXCEPTION)
++                goto END;
++        }
+     }
+ 
+-#ifndef ANDROID
++#if !defined(ANDROID) && !defined(__EMSCRIPTEN__)
+     // Find breakpoint if one exists within the block
+     if (GDBStub::IsConnected()) {
+         breakpoint_data =
+@@ -2032,7 +2108,7 @@ LDC_INST: {
+ LDM_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         unsigned int inst = inst_cream->inst;
+         if (BIT(inst, 22) && !BIT(inst, 15)) {
+@@ -2119,7 +2195,7 @@ SXTH_INST: {
+ }
+ LDR_INST: {
+     ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-    inst_cream->get_addr(cpu, inst_cream->inst, addr);
++    ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+     unsigned int value = cpu->ReadMemory32(addr);
+     cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
+@@ -2140,7 +2216,7 @@ LDR_INST: {
+ LDRCOND_INST: {
+     if (CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         unsigned int value = cpu->ReadMemory32(addr);
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = value;
+@@ -2183,7 +2259,7 @@ UXTAH_INST: {
+ LDRB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory8(addr);
+     }
+@@ -2195,7 +2271,7 @@ LDRB_INST: {
+ LDRBT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         const u32 dest_index = BITS(inst_cream->inst, 12, 15);
+         const u32 previous_mode = cpu->Mode;
+@@ -2216,7 +2292,7 @@ LDRD_INST: {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+         // Should check if RD is even-numbered, Rd != 14, addr[0:1] == 0, (CP15_reg1_U == 1 ||
+         // addr[2] == 0)
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         // The 3DS doesn't have LPAE (Large Physical Access Extension), so it
+         // wouldn't do this as a single read.
+@@ -2291,7 +2367,7 @@ LDREXD_INST: {
+ LDRH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         cpu->Reg[BITS(inst_cream->inst, 12, 15)] = cpu->ReadMemory16(addr);
+     }
+@@ -2303,7 +2379,7 @@ LDRH_INST: {
+ LDRSB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+         unsigned int value = cpu->ReadMemory8(addr);
+         if (BIT(value, 7)) {
+             value |= 0xffffff00;
+@@ -2318,7 +2394,7 @@ LDRSB_INST: {
+ LDRSH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         unsigned int value = cpu->ReadMemory16(addr);
+         if (BIT(value, 15)) {
+@@ -2334,7 +2410,7 @@ LDRSH_INST: {
+ LDRT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         const u32 dest_index = BITS(inst_cream->inst, 12, 15);
+         const u32 previous_mode = cpu->Mode;
+@@ -3559,7 +3635,7 @@ STM_INST: {
+         unsigned int Rn = BITS(inst, 16, 19);
+         unsigned int old_RN = cpu->Reg[Rn];
+ 
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+         if (BIT(inst_cream->inst, 22) == 1) {
+             for (int i = 0; i < 13; i++) {
+                 if (BIT(inst_cream->inst, i)) {
+@@ -3629,7 +3705,7 @@ SXTB_INST: {
+ STR_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         unsigned int reg = BITS(inst_cream->inst, 12, 15);
+         unsigned int value = cpu->Reg[reg];
+@@ -3669,7 +3745,7 @@ UXTAB_INST: {
+ STRB_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
+         cpu->WriteMemory8(addr, value);
+     }
+@@ -3681,7 +3757,7 @@ STRB_INST: {
+ STRBT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         const u32 previous_mode = cpu->Mode;
+         const u32 value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xff;
+@@ -3698,7 +3774,7 @@ STRBT_INST: {
+ STRD_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         // The 3DS doesn't have the Large Physical Access Extension (LPAE)
+         // so STRD wouldn't store these as a single write.
+@@ -3799,7 +3875,7 @@ STREXH_INST: {
+ STRH_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         unsigned int value = cpu->Reg[BITS(inst_cream->inst, 12, 15)] & 0xffff;
+         cpu->WriteMemory16(addr, value);
+@@ -3812,7 +3888,7 @@ STRH_INST: {
+ STRT_INST: {
+     if (inst_base->cond == ConditionCode::AL || CondPassed(cpu, inst_base->cond)) {
+         ldst_inst* inst_cream = (ldst_inst*)inst_base->component;
+-        inst_cream->get_addr(cpu, inst_cream->inst, addr);
++        ResolveAddressingOp(cpu, inst_cream, addr);
+ 
+         const u32 previous_mode = cpu->Mode;
+         const u32 rt_index = BITS(inst_cream->inst, 12, 15);
+diff --git a/src/core/arm/dyncom/arm_dyncom_trans.cpp b/src/core/arm/dyncom/arm_dyncom_trans.cpp
+index 729c407..2ebbebf 100644
+--- a/src/core/arm/dyncom/arm_dyncom_trans.cpp
++++ b/src/core/arm/dyncom/arm_dyncom_trans.cpp
+@@ -23,6 +23,21 @@ shtop_fp_t GetShifterOp(unsigned int inst);
+ get_addr_fp_t GetAddressingOp(unsigned int inst);
+ get_addr_fp_t GetAddressingOpLoadStoreT(unsigned int inst);
+ 
++template <typename T>
++static void TranslateShifterOperand(unsigned int inst, T* inst_cream) {
++    if (inst_cream->I) {
++        const u32 rotate = BITS(inst, 8, 11);
++        const u32 immediate = BITS(inst, 0, 7);
++        const u32 shift = rotate * 2;
++        inst_cream->shifter_operand =
++            rotate == 0 ? immediate : (immediate >> shift) | (immediate << (32 - shift));
++        inst_cream->I = rotate == 0 ? 1 : 2;
++        inst_cream->shtop_func = nullptr;
++    } else {
++        inst_cream->shtop_func = GetShifterOp(inst);
++    }
++}
++
+ static ARM_INST_PTR INTERPRETER_TRANSLATE(adc)(unsigned int inst, int index) {
+     arm_inst* inst_base = (arm_inst*)AllocBuffer(sizeof(arm_inst) + sizeof(adc_inst));
+     adc_inst* inst_cream = (adc_inst*)inst_base->component;
+@@ -36,7 +51,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(adc)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -56,7 +71,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(add)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -76,7 +91,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE (and)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -115,7 +130,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(bic)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -219,7 +234,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cmn)(unsigned int inst, int index) {
+     inst_cream->I = BIT(inst, 25);
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     return inst_base;
+ }
+@@ -234,7 +249,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cmp)(unsigned int inst, int index) {
+     inst_cream->I = BIT(inst, 25);
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     return inst_base;
+ }
+@@ -268,7 +283,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(cpy)(unsigned int inst, int index) {
+     inst_cream->S = BIT(inst, 20);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15) {
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -288,7 +303,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(eor)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -575,7 +590,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(mov)(unsigned int inst, int index) {
+     inst_cream->S = BIT(inst, 20);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15) {
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -657,7 +672,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(mvn)(unsigned int inst, int index) {
+     inst_cream->S = BIT(inst, 20);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15) {
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -677,7 +692,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(orr)(unsigned int inst, int index) {
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -832,7 +847,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(rsb)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -852,7 +867,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(rsc)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -904,7 +919,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(sbc)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -1400,7 +1415,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(sub)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     if (inst_cream->Rd == 15)
+         inst_base->br = TransExtData::INDIRECT_BRANCH;
+@@ -1508,7 +1523,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(teq)(unsigned int inst, int index) {
+     inst_cream->I = BIT(inst, 25);
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     return inst_base;
+ }
+@@ -1525,7 +1540,7 @@ static ARM_INST_PTR INTERPRETER_TRANSLATE(tst)(unsigned int inst, int index) {
+     inst_cream->Rn = BITS(inst, 16, 19);
+     inst_cream->Rd = BITS(inst, 12, 15);
+     inst_cream->shifter_operand = BITS(inst, 0, 11);
+-    inst_cream->shtop_func = GetShifterOp(inst);
++    TranslateShifterOperand(inst, inst_cream);
+ 
+     return inst_base;
+ }
+diff --git a/src/core/arm/skyeye_common/armstate.cpp b/src/core/arm/skyeye_common/armstate.cpp
+index 9de68dc..1e3fa76 100644
+--- a/src/core/arm/skyeye_common/armstate.cpp
++++ b/src/core/arm/skyeye_common/armstate.cpp
+@@ -3,6 +3,7 @@
+ // Refer to the license.txt file included.
+ 
+ #include <algorithm>
++#include <cstring>
+ #include "common/logging/log.h"
+ #include "common/swap.h"
+ #include "core/arm/skyeye_common/armstate.h"
+@@ -182,7 +183,7 @@ void ARMul_State::ResetMPCoreCP15Registers() {
+     CP15[CP15_MAIN_TLB_LOCKDOWN_ATTRIBUTE] = 0x00000000;
+     CP15[CP15_TLB_DEBUG_CONTROL] = 0x00000000;
+ }
+-#ifdef ANDROID
++#if defined(ANDROID) || defined(__EMSCRIPTEN__)
+ static void CheckMemoryBreakpoint(u32 address, GDBStub::BreakpointType type) {}
+ #else
+ static void CheckMemoryBreakpoint(u32 address, GDBStub::BreakpointType type) {
+@@ -193,16 +194,58 @@ static void CheckMemoryBreakpoint(u32 address, GDBStub::BreakpointType type) {
+ }
+ #endif
+ 
++#ifdef __EMSCRIPTEN__
++template <typename T>
++static bool ReadFastMemory(const ARMul_State* state, u32 address, T& value) {
++    if (!state->fastmem_page_table) {
++        return false;
++    }
++
++    const u8* page = state->fastmem_page_table[address >> Memory::CITRA_PAGE_BITS];
++    if (!page) {
++        return false;
++    }
++
++    std::memcpy(&value, page + (address & Memory::CITRA_PAGE_MASK), sizeof(T));
++    return true;
++}
++
++template <typename T>
++static bool WriteFastMemory(ARMul_State* state, u32 address, const T& value) {
++    if (!state->fastmem_page_table) {
++        return false;
++    }
++
++    u8* page = state->fastmem_page_table[address >> Memory::CITRA_PAGE_BITS];
++    if (!page) {
++        return false;
++    }
++
++    std::memcpy(page + (address & Memory::CITRA_PAGE_MASK), &value, sizeof(T));
++    return true;
++}
++#endif
++
+ u8 ARMul_State::ReadMemory8(u32 address) const {
+     CheckMemoryBreakpoint(address, GDBStub::BreakpointType::Read);
+ 
++#ifdef __EMSCRIPTEN__
++    u8 data;
++    if (ReadFastMemory(this, address, data)) {
++        return data;
++    }
++#endif
+     return memory.Read8(address);
+ }
+ 
+ u16 ARMul_State::ReadMemory16(u32 address) const {
+     CheckMemoryBreakpoint(address, GDBStub::BreakpointType::Read);
+ 
+-    u16 data = memory.Read16(address);
++    u16 data;
++#ifdef __EMSCRIPTEN__
++    if (!ReadFastMemory(this, address, data))
++#endif
++        data = memory.Read16(address);
+ 
+     if (InBigEndianMode())
+         data = Common::swap16(data);
+@@ -213,7 +256,11 @@ u16 ARMul_State::ReadMemory16(u32 address) const {
+ u32 ARMul_State::ReadMemory32(u32 address) const {
+     CheckMemoryBreakpoint(address, GDBStub::BreakpointType::Read);
+ 
+-    u32 data = memory.Read32(address);
++    u32 data;
++#ifdef __EMSCRIPTEN__
++    if (!ReadFastMemory(this, address, data))
++#endif
++        data = memory.Read32(address);
+ 
+     if (InBigEndianMode())
+         data = Common::swap32(data);
+@@ -224,7 +271,11 @@ u32 ARMul_State::ReadMemory32(u32 address) const {
+ u64 ARMul_State::ReadMemory64(u32 address) const {
+     CheckMemoryBreakpoint(address, GDBStub::BreakpointType::Read);
+ 
+-    u64 data = memory.Read64(address);
++    u64 data;
++#ifdef __EMSCRIPTEN__
++    if (!ReadFastMemory(this, address, data))
++#endif
++        data = memory.Read64(address);
+ 
+     if (InBigEndianMode())
+         data = Common::swap64(data);
+@@ -235,6 +286,11 @@ u64 ARMul_State::ReadMemory64(u32 address) const {
+ void ARMul_State::WriteMemory8(u32 address, u8 data) {
+     CheckMemoryBreakpoint(address, GDBStub::BreakpointType::Write);
+ 
++#ifdef __EMSCRIPTEN__
++    if (WriteFastMemory(this, address, data)) {
++        return;
++    }
++#endif
+     memory.Write8(address, data);
+ }
+ 
+@@ -244,6 +300,11 @@ void ARMul_State::WriteMemory16(u32 address, u16 data) {
+     if (InBigEndianMode())
+         data = Common::swap16(data);
+ 
++#ifdef __EMSCRIPTEN__
++    if (WriteFastMemory(this, address, data)) {
++        return;
++    }
++#endif
+     memory.Write16(address, data);
+ }
+ 
+@@ -253,6 +314,11 @@ void ARMul_State::WriteMemory32(u32 address, u32 data) {
+     if (InBigEndianMode())
+         data = Common::swap32(data);
+ 
++#ifdef __EMSCRIPTEN__
++    if (WriteFastMemory(this, address, data)) {
++        return;
++    }
++#endif
+     memory.Write32(address, data);
+ }
+ 
+@@ -262,6 +328,11 @@ void ARMul_State::WriteMemory64(u32 address, u64 data) {
+     if (InBigEndianMode())
+         data = Common::swap64(data);
+ 
++#ifdef __EMSCRIPTEN__
++    if (WriteFastMemory(this, address, data)) {
++        return;
++    }
++#endif
+     memory.Write64(address, data);
+ }
+ 
+diff --git a/src/core/arm/skyeye_common/armstate.h b/src/core/arm/skyeye_common/armstate.h
+index f36c46c..7523369 100644
+--- a/src/core/arm/skyeye_common/armstate.h
++++ b/src/core/arm/skyeye_common/armstate.h
+@@ -256,6 +256,58 @@ public:
+     // process for our purposes), not per ARMul_State (which tracks CPU core state).
+     std::unordered_map<u32, std::size_t> instruction_cache;
+ 
++#ifdef __EMSCRIPTEN__
++    bool enable_wasm_fast_paths = true;
++
++    // DynCom dispatches at every translated basic-block boundary. Keep a small direct-mapped
++    // cache in front of unordered_map so hot branches stay on a compact WebAssembly fast path.
++    static constexpr std::size_t FAST_INSTRUCTION_CACHE_BITS = 12;
++    static constexpr std::size_t FAST_INSTRUCTION_CACHE_SIZE =
++        1U << FAST_INSTRUCTION_CACHE_BITS;
++
++    struct FastInstructionCacheEntry {
++        std::size_t offset = 0;
++        u32 pc = 0;
++        u32 generation = 0;
++    };
++
++    bool LookupFastInstructionCache(u32 pc, std::size_t& offset) const {
++        const auto& entry = fast_instruction_cache[FastInstructionCacheIndex(pc)];
++        if (entry.generation != fast_instruction_cache_generation || entry.pc != pc) {
++            return false;
++        }
++        offset = entry.offset;
++        return true;
++    }
++
++    void StoreFastInstructionCache(u32 pc, std::size_t offset) {
++        auto& entry = fast_instruction_cache[FastInstructionCacheIndex(pc)];
++        entry = {offset, pc, fast_instruction_cache_generation};
++    }
++
++    void ClearFastInstructionCache() {
++        if (++fast_instruction_cache_generation == 0) {
++            for (auto& entry : fast_instruction_cache) {
++                entry.generation = 0;
++            }
++            fast_instruction_cache_generation = 1;
++        }
++    }
++
++    // Raw view of the active process page table. A non-null page entry is guaranteed to be plain
++    // RAM, while MMIO and rasterizer-cached pages remain on MemorySystem's slow path.
++    u8* const* fastmem_page_table = nullptr;
++
++private:
++    static constexpr std::size_t FastInstructionCacheIndex(u32 pc) {
++        constexpr u32 hash_multiplier = 0x9E3779B1U;
++        return ((pc >> 1) * hash_multiplier) >> (32 - FAST_INSTRUCTION_CACHE_BITS);
++    }
++
++    std::array<FastInstructionCacheEntry, FAST_INSTRUCTION_CACHE_SIZE> fast_instruction_cache{};
++    u32 fast_instruction_cache_generation = 1;
++#endif
++
+ private:
+     void ResetMPCoreCP15Registers();
+ 
+diff --git a/src/core/core.cpp b/src/core/core.cpp
+index 00e79ae..2cb4e9d 100644
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -531,15 +531,19 @@ System::ResultStatus System::Init(Frontend::EmuWindow& emu_window,
+         }
+ #else
+         for (u32 i = 0; i < num_cores; ++i) {
+-            cpu_cores.push_back(
+-                std::make_shared<ARM_DynCom>(*this, *memory, USER32MODE, i, timing->GetTimer(i)));
++            cpu_cores.push_back(std::make_shared<ARM_DynCom>(
++                *this, *memory, USER32MODE, i, timing->GetTimer(i), true));
+         }
++#ifdef __EMSCRIPTEN__
++        LOG_INFO(Core, "Using the WebAssembly cached ARM translator with fast block and memory paths");
++#else
+         LOG_WARNING(Core, "CPU JIT requested, but Dynarmic not available");
++#endif
+ #endif
+     } else {
+         for (u32 i = 0; i < num_cores; ++i) {
+-            cpu_cores.push_back(
+-                std::make_shared<ARM_DynCom>(*this, *memory, USER32MODE, i, timing->GetTimer(i)));
++            cpu_cores.push_back(std::make_shared<ARM_DynCom>(
++                *this, *memory, USER32MODE, i, timing->GetTimer(i), false));
+         }
+     }
+     running_core = cpu_cores[0].get();
+diff --git a/src/core/frontend/applets/swkbd.cpp b/src/core/frontend/applets/swkbd.cpp
+index bb965fd..11ff620 100644
+--- a/src/core/frontend/applets/swkbd.cpp
++++ b/src/core/frontend/applets/swkbd.cpp
+@@ -5,8 +5,9 @@
+ #include <algorithm>
+ #include <cctype>
+ #ifdef __EMSCRIPTEN__
+-#include <cstdlib>
+-extern "C" char* EmulatorJSShowKeyboard(const char* hint, int max_length, int password_mode);
++#include <emscripten/emscripten.h>
++extern "C" void EmulatorJSShowKeyboard(const char* hint, int max_length, int password_mode,
++                                        unsigned request_id);
+ #endif
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+@@ -17,6 +18,13 @@ extern "C" char* EmulatorJSShowKeyboard(const char* hint, int max_length, int pa
+ 
+ namespace Frontend {
+ 
++#ifdef __EMSCRIPTEN__
++namespace {
++DefaultKeyboard* active_browser_keyboard = nullptr;
++u32 next_browser_keyboard_request_id = 0;
++} // namespace
++#endif
++
+ ValidationError SoftwareKeyboard::ValidateFilters(const std::string& input) const {
+     if (config.filters.prevent_digit) {
+         if (std::count_if(input.begin(), input.end(),
+@@ -150,6 +158,14 @@ const KeyboardData& SoftwareKeyboard::ReceiveData() {
+ 
+ DefaultKeyboard::DefaultKeyboard(Core::System& system_) : system(system_) {}
+ 
++DefaultKeyboard::~DefaultKeyboard() {
++#ifdef __EMSCRIPTEN__
++    if (active_browser_keyboard == this) {
++        active_browser_keyboard = nullptr;
++    }
++#endif
++}
++
+ void DefaultKeyboard::Execute(const Frontend::KeyboardConfig& config_) {
+     SoftwareKeyboard::Execute(config_);
+ 
+@@ -158,51 +174,66 @@ void DefaultKeyboard::Execute(const Frontend::KeyboardConfig& config_) {
+                            ? "Enter text:"
+                            : this->config.hint_text.c_str();
+     const int max_length = static_cast<int>(this->config.max_text_length);
+-    char* js_result = EmulatorJSShowKeyboard(hint, max_length, 0);
+-
+-    const bool cancelled = js_result == nullptr;
+-    std::string text = cancelled ? std::string{} : std::string{js_result};
+-    if (js_result) {
+-        std::free(js_result);
+-    }
+-
+-    u8 ok_button;
+-    u8 cancel_button = 0;
++    request_id = ++next_browser_keyboard_request_id;
++    active_browser_keyboard = this;
++    EmulatorJSShowKeyboard(hint, max_length, 0, request_id);
++#else
++    auto cfg = Service::CFG::GetModule(system);
++    std::string username = Common::UTF16ToUTF8(cfg->GetUsername());
+     switch (this->config.button_config) {
+     case ButtonConfig::None:
+     case ButtonConfig::Single:
+-        ok_button = 0;
++        Finalize(username, 0);
+         break;
+     case ButtonConfig::Dual:
+-        ok_button = 1;
++        Finalize(username, 1);
+         break;
+     case ButtonConfig::Triple:
+-        ok_button = 2;
++        Finalize(username, 2);
+         break;
+     default:
+         UNREACHABLE();
+     }
+-    Finalize(text, cancelled ? cancel_button : ok_button);
+-#else
+-    auto cfg = Service::CFG::GetModule(system);
+-    std::string username = Common::UTF16ToUTF8(cfg->GetUsername());
++#endif
++}
++
++#ifdef __EMSCRIPTEN__
++void DefaultKeyboard::SubmitBrowserResult(u32 result_request_id, const char* result,
++                                          bool cancelled) {
++    if (result_request_id != request_id) {
++        return;
++    }
++    active_browser_keyboard = nullptr;
++
++    std::string text = cancelled || result == nullptr ? std::string{} : std::string{result};
++
++    u8 ok_button;
++    u8 cancel_button = 0;
+     switch (this->config.button_config) {
+     case ButtonConfig::None:
+     case ButtonConfig::Single:
+-        Finalize(username, 0);
++        ok_button = 0;
+         break;
+     case ButtonConfig::Dual:
+-        Finalize(username, 1);
++        ok_button = 1;
+         break;
+     case ButtonConfig::Triple:
+-        Finalize(username, 2);
++        ok_button = 2;
+         break;
+     default:
+         UNREACHABLE();
+     }
+-#endif
++    Finalize(text, cancelled ? cancel_button : ok_button);
+ }
+ 
++extern "C" EMSCRIPTEN_KEEPALIVE void EmulatorJSKeyboardResult(unsigned result_request_id,
++                                                               const char* result, int cancelled) {
++    if (active_browser_keyboard != nullptr) {
++        active_browser_keyboard->SubmitBrowserResult(result_request_id, result, cancelled != 0);
++    }
++}
++#endif
++
+ void DefaultKeyboard::ShowError(const std::string& error) {
+     LOG_ERROR(Applet_SWKBD, "Default keyboard text is unaccepted! error: {}", error);
+ }
+diff --git a/src/core/frontend/applets/swkbd.h b/src/core/frontend/applets/swkbd.h
+index 82a1a2e..a53d1af 100644
+--- a/src/core/frontend/applets/swkbd.h
++++ b/src/core/frontend/applets/swkbd.h
+@@ -142,11 +142,19 @@ protected:
+ class DefaultKeyboard final : public SoftwareKeyboard {
+ public:
+     explicit DefaultKeyboard(Core::System& system_);
++    ~DefaultKeyboard() override;
+     void Execute(const KeyboardConfig& config) override;
+     void ShowError(const std::string& error) override;
+ 
++#ifdef __EMSCRIPTEN__
++    void SubmitBrowserResult(u32 result_request_id, const char* result, bool cancelled);
++#endif
++
+ private:
+     Core::System& system;
++#ifdef __EMSCRIPTEN__
++    u32 request_id = 0;
++#endif
+ };
+ 
+ } // namespace Frontend
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index a8ade34..9228e16 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -46,6 +46,7 @@ add_library(video_core STATIC
+     pica/packed_attribute.h
+     pica/vertex_loader.cpp
+     pica/vertex_loader.h
++    pica/vertex_cache.h
+     rasterizer_cache/framebuffer_base.h
+     rasterizer_cache/pixel_format.cpp
+     rasterizer_cache/pixel_format.h
+@@ -85,6 +86,8 @@ add_library(video_core STATIC
+     shader/shader.h
+     shader/shader_interpreter.cpp
+     shader/shader_interpreter.h
++    shader/shader_interpreter_decoded.h
++    shader/shader_stack.h
+     shader/shader_jit.cpp
+     shader/shader_jit.h
+     shader/shader_jit_a64_compiler.cpp
+diff --git a/src/video_core/host_shaders/opengl_present.frag b/src/video_core/host_shaders/opengl_present.frag
+index 83a00ff..f55f669 100644
+--- a/src/video_core/host_shaders/opengl_present.frag
++++ b/src/video_core/host_shaders/opengl_present.frag
+@@ -8,11 +8,18 @@ in vec2 frag_tex_coord;
+ out vec4 color;
+ 
+ uniform sampler2D color_texture;
++uniform int color_swizzle;
+ 
+ uniform vec4 i_resolution;
+ uniform vec4 o_resolution;
+ uniform int layer;
+ 
+ void main() {
+-    color = texture(color_texture, frag_tex_coord);
++    vec4 sampled = texture(color_texture, frag_tex_coord);
++    if (color_swizzle == 1)
++        color = sampled.bgra;
++    else if (color_swizzle == 2)
++        color = sampled.abgr;
++    else
++        color = sampled;
+ }
+diff --git a/src/video_core/host_shaders/opengl_present_anaglyph.frag b/src/video_core/host_shaders/opengl_present_anaglyph.frag
+index c477c43..0321a7d 100644
+--- a/src/video_core/host_shaders/opengl_present_anaglyph.frag
++++ b/src/video_core/host_shaders/opengl_present_anaglyph.frag
+@@ -21,6 +21,8 @@ layout(location = 0) out vec4 color;
+ 
+ layout(binding = 0) uniform sampler2D color_texture;
+ layout(binding = 1) uniform sampler2D color_texture_r;
++uniform int color_swizzle;
++uniform int color_swizzle_r;
+ 
+ uniform vec4 resolution;
+ uniform int layer;
+@@ -28,5 +30,15 @@ uniform int layer;
+ void main() {
+     vec4 color_tex_l = texture(color_texture, frag_tex_coord);
+     vec4 color_tex_r = texture(color_texture_r, frag_tex_coord);
++    if (color_swizzle == 1) {
++        color_tex_l = color_tex_l.bgra;
++    } else if (color_swizzle == 2) {
++        color_tex_l = color_tex_l.abgr;
++    }
++    if (color_swizzle_r == 1) {
++        color_tex_r = color_tex_r.bgra;
++    } else if (color_swizzle_r == 2) {
++        color_tex_r = color_tex_r.abgr;
++    }
+     color = vec4(color_tex_l.rgb*l+color_tex_r.rgb*r, color_tex_l.a);
+ }
+diff --git a/src/video_core/host_shaders/opengl_present_interlaced.frag b/src/video_core/host_shaders/opengl_present_interlaced.frag
+index 02e507d..4093360 100644
+--- a/src/video_core/host_shaders/opengl_present_interlaced.frag
++++ b/src/video_core/host_shaders/opengl_present_interlaced.frag
+@@ -9,14 +9,28 @@ layout(location = 0) out vec4 color;
+ 
+ layout(binding = 0) uniform sampler2D color_texture;
+ layout(binding = 1) uniform sampler2D color_texture_r;
++uniform int color_swizzle;
++uniform int color_swizzle_r;
+ 
+ uniform vec4 o_resolution;
+ uniform int reverse_interlaced;
+ 
+ void main() {
+     float screen_row = o_resolution.x * frag_tex_coord.x;
+-    if (int(screen_row) % 2 == reverse_interlaced)
+-        color = texture(color_texture, frag_tex_coord);
++    vec4 sampled;
++    int swizzle;
++    if (int(screen_row) % 2 == reverse_interlaced) {
++        sampled = texture(color_texture, frag_tex_coord);
++        swizzle = color_swizzle;
++    } else {
++        sampled = texture(color_texture_r, frag_tex_coord);
++        swizzle = color_swizzle_r;
++    }
++
++    if (swizzle == 1)
++        color = sampled.bgra;
++    else if (swizzle == 2)
++        color = sampled.abgr;
+     else
+-        color = texture(color_texture_r, frag_tex_coord);
++        color = sampled;
+ }
+diff --git a/src/video_core/pica/pica_core.cpp b/src/video_core/pica/pica_core.cpp
+index 9f19e95..f8f4c9a 100644
+--- a/src/video_core/pica/pica_core.cpp
++++ b/src/video_core/pica/pica_core.cpp
+@@ -2,6 +2,11 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#if defined(__EMSCRIPTEN__)
++#include <chrono>
++#include <emscripten.h>
++#endif
++
+ #include "common/arch.h"
+ #include "common/archives.h"
+ #include "common/microprofile.h"
+@@ -11,6 +16,7 @@
+ #include "core/memory.h"
+ #include "video_core/debug_utils/debug_utils.h"
+ #include "video_core/pica/pica_core.h"
++#include "video_core/pica/vertex_cache.h"
+ #include "video_core/pica/vertex_loader.h"
+ #include "video_core/rasterizer_interface.h"
+ #include "video_core/shader/shader.h"
+@@ -21,6 +27,86 @@ MICROPROFILE_DEFINE(GPU_Drawing, "GPU", "Drawing", MP_RGB(50, 50, 240));
+ 
+ using namespace DebugUtils;
+ 
++#if defined(__EMSCRIPTEN__)
++namespace {
++
++struct PicaDrawTelemetry {
++    using Clock = std::chrono::steady_clock;
++
++    Clock::time_point window_start{Clock::now()};
++    u32 total_draws{};
++    u32 total_vertices{};
++    u32 indexed_draws{};
++    u32 hw_eligible_draws{};
++    u32 hw_eligible_vertices{};
++    u32 hw_success_draws{};
++    u32 hw_success_vertices{};
++    u32 cpu_fallback_draws{};
++    u32 cpu_fallback_vertices{};
++    u32 shader_invocations{};
++    u32 indexed_vertex_cache_hits{};
++    u32 indexed_vertex_cache_misses{};
++    u32 load_vertices_batches{};
++    u32 load_vertices_total_us{};
++    u32 load_vertices_max_us{};
++};
++
++PicaDrawTelemetry& GetPicaDrawTelemetry() {
++    static PicaDrawTelemetry telemetry;
++    return telemetry;
++}
++
++void PublishPicaDrawTelemetryIfReady() {
++    auto& telemetry = GetPicaDrawTelemetry();
++    // Avoid a host clock call for every PICA batch in the hot draw path.
++    if ((telemetry.total_draws & 0x3f) != 0) {
++        return;
++    }
++
++    const auto now = PicaDrawTelemetry::Clock::now();
++    const u32 elapsed_ms = static_cast<u32>(
++        std::chrono::duration_cast<std::chrono::milliseconds>(now - telemetry.window_start)
++            .count());
++    if (elapsed_ms < 1000) {
++        return;
++    }
++
++    EM_ASM(({
++        const loadVerticesBatches = $13;
++        globalThis.__AZAHAR_PICA_DRAWS__ = {
++            at: Date.now(),
++            elapsedMs: $0,
++            totalDraws: $1,
++            totalVertices: $2,
++            indexedDraws: $3,
++            hwEligibleDraws: $4,
++            hwEligibleVertices: $5,
++            hwSuccessDraws: $6,
++            hwSuccessVertices: $7,
++            cpuFallbackDraws: $8,
++            cpuFallbackVertices: $9,
++            shaderInvocations: $10,
++            indexedVertexCacheHits: $11,
++            indexedVertexCacheMisses: $12,
++            loadVerticesBatches,
++            loadVerticesTotalMs: $14 / 1000,
++            loadVerticesAverageMs: loadVerticesBatches ? ($14 / loadVerticesBatches) / 1000 : 0,
++            loadVerticesMaxMs: $15 / 1000
++        };
++    }), elapsed_ms, telemetry.total_draws, telemetry.total_vertices, telemetry.indexed_draws,
++       telemetry.hw_eligible_draws, telemetry.hw_eligible_vertices, telemetry.hw_success_draws,
++       telemetry.hw_success_vertices, telemetry.cpu_fallback_draws,
++       telemetry.cpu_fallback_vertices, telemetry.shader_invocations,
++       telemetry.indexed_vertex_cache_hits, telemetry.indexed_vertex_cache_misses,
++       telemetry.load_vertices_batches, telemetry.load_vertices_total_us,
++       telemetry.load_vertices_max_us);
++
++    telemetry = PicaDrawTelemetry{};
++}
++
++} // Anonymous namespace
++#endif
++
+ union CommandHeader {
+     u32 hex;
+     BitField<0, 16, u32> cmd_id;
+@@ -543,6 +629,12 @@ void PicaCore::DrawArrays(bool is_indexed) {
+         // games.
+ 
+         bool accelerate_draw = Settings::values.use_hw_shader && primitive_assembler.IsEmpty();
++#if defined(__EMSCRIPTEN__)
++        // WebGL hardware draw remains opt-in because ANGLE can spend seconds compiling dynamic
++        // vertex executables for some games. The regular hardware-shader setting still controls
++        // native backends and the software PICA path used by the web build.
++        accelerate_draw = accelerate_draw && Settings::values.use_webgl_hw_draw;
++#endif
+         const auto topology = primitive_assembler.GetTopology();
+         if (topology == PipelineRegs::TriangleTopology::Shader ||
+             topology == PipelineRegs::TriangleTopology::List) {
+@@ -551,11 +643,33 @@ void PicaCore::DrawArrays(bool is_indexed) {
+         return accelerate_draw;
+     }();
+ 
++#if defined(__EMSCRIPTEN__)
++    auto& telemetry = GetPicaDrawTelemetry();
++    const u32 vertices = regs.internal.pipeline.num_vertices;
++    telemetry.total_draws++;
++    telemetry.total_vertices += vertices;
++    telemetry.indexed_draws += is_indexed ? 1 : 0;
++    if (accelerate_draw) {
++        telemetry.hw_eligible_draws++;
++        telemetry.hw_eligible_vertices += vertices;
++    }
++#endif
++
+     // Attempt to use hardware vertex shaders if possible.
+     if (accelerate_draw && rasterizer->AccelerateDrawBatch(is_indexed)) {
++#if defined(__EMSCRIPTEN__)
++        telemetry.hw_success_draws++;
++        telemetry.hw_success_vertices += vertices;
++        PublishPicaDrawTelemetryIfReady();
++#endif
+         return;
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    telemetry.cpu_fallback_draws++;
++    telemetry.cpu_fallback_vertices += vertices;
++#endif
++
+     // We cannot accelerate the draw, so load and execute the vertex shader for each vertex.
+     LoadVertices(is_indexed);
+ 
+@@ -565,9 +679,20 @@ void PicaCore::DrawArrays(bool is_indexed) {
+     if (debug_context) {
+         debug_context->OnEvent(DebugContext::Event::FinishedPrimitiveBatch, nullptr);
+     }
++
++#if defined(__EMSCRIPTEN__)
++    PublishPicaDrawTelemetryIfReady();
++#endif
+ }
+ 
+ void PicaCore::LoadVertices(bool is_indexed) {
++#if defined(__EMSCRIPTEN__)
++    const auto load_vertices_start = PicaDrawTelemetry::Clock::now();
++    u32 shader_invocations = 0;
++    u32 indexed_vertex_cache_hits = 0;
++    u32 indexed_vertex_cache_misses = 0;
++#endif
++
+     // Read and validate vertex information from the loaders
+     const auto& pipeline = regs.internal.pipeline;
+     const PAddr base_address = pipeline.vertex_attributes.GetPhysicalBaseAddress();
+@@ -581,11 +706,8 @@ void PicaCore::LoadVertices(bool is_indexed) {
+     const bool index_u16 = index_info.format != 0;
+ 
+     // Simple circular-replacement vertex cache
+-    const std::size_t VERTEX_CACHE_SIZE = 64;
+-    std::array<bool, VERTEX_CACHE_SIZE> vertex_cache_valid{};
+-    std::array<u16, VERTEX_CACHE_SIZE> vertex_cache_ids;
+-    std::array<AttributeBuffer, VERTEX_CACHE_SIZE> vertex_cache;
+-    u32 vertex_cache_pos = 0;
++    VertexCacheIndex vertex_cache_index;
++    std::array<AttributeBuffer, VertexCacheIndex::Capacity> vertex_cache;
+ 
+     // Compile the vertex shader for this batch.
+     ShaderUnit shader_unit;
+@@ -610,13 +732,19 @@ void PicaCore::LoadVertices(bool is_indexed) {
+                 continue;
+             }
+ 
+-            for (u32 i = 0; i < VERTEX_CACHE_SIZE; ++i) {
+-                if (vertex_cache_valid[i] && vertex == vertex_cache_ids[i]) {
+-                    vs_output = vertex_cache[i];
+-                    vertex_cache_hit = true;
+-                    break;
+-                }
++            const unsigned slot = vertex_cache_index.Find(static_cast<u16>(vertex));
++            if (slot != VertexCacheIndex::Missing) {
++                vs_output = vertex_cache[slot];
++                vertex_cache_hit = true;
+             }
++
++#if defined(__EMSCRIPTEN__)
++            if (vertex_cache_hit) {
++                indexed_vertex_cache_hits++;
++            } else {
++                indexed_vertex_cache_misses++;
++            }
++#endif
+         }
+ 
+         if (!vertex_cache_hit) {
+@@ -632,21 +760,35 @@ void PicaCore::LoadVertices(bool is_indexed) {
+ 
+             // Invoke the vertex shader for this vertex.
+             shader_unit.LoadInput(regs.internal.vs, input);
++#if defined(__EMSCRIPTEN__)
++            shader_invocations++;
++#endif
+             shader_engine->Run(vs_setup, shader_unit);
+             shader_unit.WriteOutput(regs.internal.vs, vs_output);
+ 
+             // Cache the vertex when doing indexed rendering.
+             if (is_indexed) {
+-                vertex_cache[vertex_cache_pos] = vs_output;
+-                vertex_cache_valid[vertex_cache_pos] = true;
+-                vertex_cache_ids[vertex_cache_pos] = vertex;
+-                vertex_cache_pos = (vertex_cache_pos + 1) % VERTEX_CACHE_SIZE;
++                vertex_cache[vertex_cache_index.Insert(static_cast<u16>(vertex))] = vs_output;
+             }
+         }
+ 
+         // Send to geometry pipeline
+         geometry_pipeline.SubmitVertex(vs_output);
+     }
++
++#if defined(__EMSCRIPTEN__)
++    const u32 load_vertices_us = static_cast<u32>(
++        std::chrono::duration_cast<std::chrono::microseconds>(PicaDrawTelemetry::Clock::now() -
++                                                              load_vertices_start)
++            .count());
++    auto& telemetry = GetPicaDrawTelemetry();
++    telemetry.shader_invocations += shader_invocations;
++    telemetry.indexed_vertex_cache_hits += indexed_vertex_cache_hits;
++    telemetry.indexed_vertex_cache_misses += indexed_vertex_cache_misses;
++    telemetry.load_vertices_batches++;
++    telemetry.load_vertices_total_us += load_vertices_us;
++    telemetry.load_vertices_max_us = std::max(telemetry.load_vertices_max_us, load_vertices_us);
++#endif
+ }
+ 
+ PicaCore::RenderPropertiesGuess PicaCore::GuessCmdRenderProperties(PAddr list, u32 size) {
+diff --git a/src/video_core/pica/shader_setup.cpp b/src/video_core/pica/shader_setup.cpp
+index 64647a4..241bdad 100644
+--- a/src/video_core/pica/shader_setup.cpp
++++ b/src/video_core/pica/shader_setup.cpp
+@@ -9,6 +9,7 @@
+ #include "common/logging/log.h"
+ #include "video_core/pica/regs_shader.h"
+ #include "video_core/pica/shader_setup.h"
++#include "video_core/shader/shader_interpreter_decoded.h"
+ 
+ namespace Pica {
+ 
+@@ -16,6 +17,27 @@ ShaderSetup::ShaderSetup() = default;
+ 
+ ShaderSetup::~ShaderSetup() = default;
+ 
++Shader::InterpreterCache::InterpreterCache() = default;
++Shader::InterpreterCache::~InterpreterCache() = default;
++Shader::InterpreterCache::InterpreterCache(const InterpreterCache&) {}
++
++Shader::InterpreterCache& Shader::InterpreterCache::operator=(const InterpreterCache& other) {
++    if (this != &other) {
++        program.reset();
++        version = 1;
++    }
++    return *this;
++}
++
++void Shader::InterpreterCache::Reset() {
++    if (program) {
++        for (auto& instruction : program->instructions) {
++            instruction.version = 0;
++        }
++    }
++    version = 1;
++}
++
+ void ShaderSetup::WriteUniformBoolReg(u32 value) {
+     const auto bits = BitSet32(value);
+     for (u32 i = 0; i < uniforms.b.size(); ++i) {
+@@ -84,6 +106,7 @@ void ShaderSetup::DoProgramCodeFixup() {
+         memcpy(program_code_fixup.data(), program_code.data(), program_code.size());
+         has_fixup = true;
+         program_code_hash_dirty = true;
++        interpreter_cache.Invalidate();
+     };
+ 
+     /**
+diff --git a/src/video_core/pica/shader_setup.h b/src/video_core/pica/shader_setup.h
+index afad847..25a34b6 100644
+--- a/src/video_core/pica/shader_setup.h
++++ b/src/video_core/pica/shader_setup.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <memory>
+ #include <optional>
+ #include "common/vector_math.h"
+ #include "video_core/pica/packed_attribute.h"
+@@ -11,6 +12,30 @@
+ 
+ namespace Pica {
+ 
++namespace Shader {
++struct DecodedProgram;
++
++// A copied setup starts cold, so independent shaders never share mutable decoded entries.
++struct InterpreterCache {
++    InterpreterCache();
++    ~InterpreterCache();
++    InterpreterCache(const InterpreterCache&);
++    InterpreterCache& operator=(const InterpreterCache&);
++
++    void Invalidate() {
++        if (++version == 0) [[unlikely]] {
++            Reset();
++        }
++    }
++
++    u64 version = 1;
++    std::unique_ptr<DecodedProgram> program;
++
++private:
++    void Reset();
++};
++}
++
+ constexpr u32 MAX_PROGRAM_CODE_LENGTH = 4096;
+ constexpr u32 MAX_SWIZZLE_DATA_LENGTH = 4096;
+ 
+@@ -86,6 +111,7 @@ public:
+             return;
+ 
+         inst = value;
++        interpreter_cache.Invalidate();
+         if (!program_code_hash_dirty) {
+             MakeProgramCodeDirty();
+         }
+@@ -98,6 +124,7 @@ public:
+         program_code = other;
+         biggest_program_size = std::max(biggest_program_size, other_size);
+         MakeProgramCodeDirty();
++        interpreter_cache.Invalidate();
+     }
+ 
+     inline void UpdateSwizzleData(size_t offset, u32 value) {
+@@ -108,6 +135,7 @@ public:
+             return;
+ 
+         data = value;
++        interpreter_cache.Invalidate();
+         if (!swizzle_data_hash_dirty) {
+             MakeSwizzleDataDirty();
+         }
+@@ -120,6 +148,7 @@ public:
+         swizzle_data = other;
+         biggest_swizzle_size = std::max(biggest_swizzle_size, other_size);
+         MakeSwizzleDataDirty();
++        interpreter_cache.Invalidate();
+     }
+ 
+     const ProgramCode& GetProgramCode() const {
+@@ -146,6 +175,8 @@ public:
+     bool uniforms_dirty = true;
+     bool requires_fixup = false;
+     bool has_fixup = false;
++    // Transient decode cache. Uniform values and per-vertex registers are never cached.
++    Shader::InterpreterCache interpreter_cache;
+ 
+ private:
+     ProgramCode program_code{};
+@@ -178,6 +209,7 @@ private:
+         ar & has_fixup;
+         if (Archive::is_loading::value) {
+             uniforms_dirty = true;
++            interpreter_cache.Invalidate();
+         }
+     }
+ };
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+index ac8c41a..458a32f 100644
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -2,6 +2,13 @@
+ // Licensed under GPLv2 or any later version
+ // Refer to the license.txt file included.
+ 
++#include <array>
++#include <chrono>
++
++#if defined(__EMSCRIPTEN__)
++#include <emscripten.h>
++#endif
++
+ #include "common/alignment.h"
+ #include "common/assert.h"
+ #include "common/literals.h"
+@@ -32,9 +39,130 @@ using namespace Pica::Shader::Generator;
+ 
+ constexpr std::size_t VERTEX_BUFFER_SIZE = 16_MiB;
+ constexpr std::size_t INDEX_BUFFER_SIZE = 2_MiB;
++#if defined(__EMSCRIPTEN__)
++// WebGL has no persistent mapping. Smaller rings bound the storage retired on wrap;
++// Map can still grow them for large accelerated draws without changing draw eligibility.
++constexpr std::size_t VERTEX_BUFFER_INITIAL_SIZE = 2_MiB;
++constexpr std::size_t INDEX_BUFFER_INITIAL_SIZE = 256_KiB;
++constexpr std::size_t UNIFORM_BUFFER_SIZE = 64_KiB;
++#else
++constexpr std::size_t VERTEX_BUFFER_INITIAL_SIZE = VERTEX_BUFFER_SIZE;
++constexpr std::size_t INDEX_BUFFER_INITIAL_SIZE = INDEX_BUFFER_SIZE;
+ constexpr std::size_t UNIFORM_BUFFER_SIZE = 8_MiB;
++#endif
+ constexpr std::size_t TEXTURE_BUFFER_SIZE = 2_MiB;
+ 
++#if defined(__EMSCRIPTEN__)
++constexpr std::size_t WEBGL_LUT_WIDTH = 2048;
++constexpr std::size_t WEBGL_LUT_LF_ENTRIES =
++    256 * Pica::LightingRegs::NumLightingSampler + 128;
++constexpr std::size_t WEBGL_LUT_LF_HEIGHT =
++    (WEBGL_LUT_LF_ENTRIES + WEBGL_LUT_WIDTH - 1) / WEBGL_LUT_WIDTH;
++
++enum class WebGLDrawResult {
++    Accelerated,
++    LightingFallback,
++    PipelineFallback,
++    VertexShaderFallback,
++    GeometryShaderFallback,
++    DrawFallback,
++};
++
++struct WebGLDrawTelemetry {
++    using Clock = std::chrono::steady_clock;
++
++    Clock::time_point window_start{Clock::now()};
++    u32 attempts{};
++    u32 accelerated{};
++    u32 attempted_vertices{};
++    u32 accelerated_vertices{};
++    u32 indexed_attempts{};
++    u32 indexed_accelerated{};
++    u32 lighting_fallbacks{};
++    u32 pipeline_fallbacks{};
++    u32 vertex_shader_fallbacks{};
++    u32 geometry_shader_fallbacks{};
++    u32 draw_fallbacks{};
++};
++
++void RecordWebGLDrawResult(WebGLDrawResult result, u32 vertices, bool is_indexed) {
++    static WebGLDrawTelemetry telemetry;
++    telemetry.attempts++;
++    telemetry.attempted_vertices += vertices;
++    telemetry.indexed_attempts += is_indexed ? 1 : 0;
++
++    switch (result) {
++    case WebGLDrawResult::Accelerated:
++        telemetry.accelerated++;
++        telemetry.accelerated_vertices += vertices;
++        telemetry.indexed_accelerated += is_indexed ? 1 : 0;
++        break;
++    case WebGLDrawResult::LightingFallback:
++        telemetry.lighting_fallbacks++;
++        break;
++    case WebGLDrawResult::PipelineFallback:
++        telemetry.pipeline_fallbacks++;
++        break;
++    case WebGLDrawResult::VertexShaderFallback:
++        telemetry.vertex_shader_fallbacks++;
++        break;
++    case WebGLDrawResult::GeometryShaderFallback:
++        telemetry.geometry_shader_fallbacks++;
++        break;
++    case WebGLDrawResult::DrawFallback:
++        telemetry.draw_fallbacks++;
++        break;
++    }
++
++    // Reading the host clock for every draw can cost more than the counters
++    // themselves in WebAssembly. Sampling every 64 batches keeps telemetry
++    // responsive without adding a host call to the hot draw path.
++    if ((telemetry.attempts & 0x3f) != 0) {
++        return;
++    }
++
++    const auto now = WebGLDrawTelemetry::Clock::now();
++    const auto elapsed_ms = static_cast<u32>(
++        std::chrono::duration_cast<std::chrono::milliseconds>(now - telemetry.window_start)
++            .count());
++    if (elapsed_ms < 1000) {
++        return;
++    }
++
++    EM_ASM(({
++        const attempts = $1;
++        const attemptedVertices = $3;
++        globalThis.__AZAHAR_GPU_DRAWS__ = {
++            at: Date.now(),
++            elapsedMs: $0,
++            attempts,
++            accelerated: $2,
++            accelerationRate: attempts ? $2 / attempts : 0,
++            attemptedVertices,
++            acceleratedVertices: $4,
++            vertexAccelerationRate: attemptedVertices ? $4 / attemptedVertices : 0,
++            indexed: {
++                attempts: $5,
++                accelerated: $6
++            },
++            fallbacks: {
++                lighting: $7,
++                pipeline: $8,
++                vertexShader: $9,
++                geometryShader: $10,
++                draw: $11
++            }
++        };
++    }), elapsed_ms, telemetry.attempts, telemetry.accelerated, telemetry.attempted_vertices,
++       telemetry.accelerated_vertices, telemetry.indexed_attempts, telemetry.indexed_accelerated,
++       telemetry.lighting_fallbacks, telemetry.pipeline_fallbacks,
++       telemetry.vertex_shader_fallbacks, telemetry.geometry_shader_fallbacks,
++       telemetry.draw_fallbacks);
++
++    telemetry = WebGLDrawTelemetry{};
++}
++#endif
++
+ GLenum MakePrimitiveMode(Pica::PipelineRegs::TriangleTopology topology) {
+     switch (topology) {
+     case Pica::PipelineRegs::TriangleTopology::Shader:
+@@ -66,7 +194,8 @@ GLenum MakeAttributeType(Pica::PipelineRegs::VertexAttributeFormat format) {
+ 
+ [[nodiscard]] GLsizeiptr TextureBufferSize(const Driver& driver, bool is_lf) {
+ #if defined(__EMSCRIPTEN__)
+-    return TEXTURE_BUFFER_SIZE;
++    // WebGL uses dedicated 2D textures for LUTs. Keep the otherwise-unused stream buffers tiny.
++    return 16;
+ #else
+     // Use the smallest texel size from the texel views
+     // which corresponds to GL_RG32F
+@@ -91,9 +220,9 @@ RasterizerOpenGL::RasterizerOpenGL(Memory::MemorySystem& memory, Pica::PicaCore&
+     : VideoCore::RasterizerAccelerated{memory, pica}, driver{driver_},
+       render_window{renderer.GetRenderWindow()}, runtime{driver, renderer},
+       res_cache{memory, custom_tex_manager, runtime, regs, renderer},
+-      vertex_buffer{driver, GL_ARRAY_BUFFER, VERTEX_BUFFER_SIZE},
++      vertex_buffer{driver, GL_ARRAY_BUFFER, VERTEX_BUFFER_INITIAL_SIZE},
+       uniform_buffer{driver, GL_UNIFORM_BUFFER, UNIFORM_BUFFER_SIZE},
+-      index_buffer{driver, GL_ELEMENT_ARRAY_BUFFER, INDEX_BUFFER_SIZE},
++      index_buffer{driver, GL_ELEMENT_ARRAY_BUFFER, INDEX_BUFFER_INITIAL_SIZE},
+       texture_buffer{driver, GL_TEXTURE_BUFFER, TextureBufferSize(driver, false)},
+       texture_lf_buffer{driver, GL_TEXTURE_BUFFER, TextureBufferSize(driver, true)} {
+ 
+@@ -155,7 +284,24 @@ RasterizerOpenGL::RasterizerOpenGL(Memory::MemorySystem& memory, Pica::PicaCore&
+     state.texture_buffer_lut_rg.texture_buffer = texture_buffer_lut_rg.handle;
+     state.texture_buffer_lut_rgba.texture_buffer = texture_buffer_lut_rgba.handle;
+     state.Apply();
+-#if !defined(__EMSCRIPTEN__)
++#if defined(__EMSCRIPTEN__)
++    const auto allocate_lut = [](TextureUnits::TextureUnit unit, GLuint handle,
++                                 GLenum internal_format, GLsizei height) {
++        glActiveTexture(unit.Enum());
++        glBindTexture(GL_TEXTURE_2D, handle);
++        glTexStorage2D(GL_TEXTURE_2D, 1, internal_format,
++                       static_cast<GLsizei>(WEBGL_LUT_WIDTH), height);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
++        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
++    };
++    allocate_lut(TextureUnits::TextureBufferLUT_LF, texture_buffer_lut_lf.handle, GL_RG32F,
++                 static_cast<GLsizei>(WEBGL_LUT_LF_HEIGHT));
++    allocate_lut(TextureUnits::TextureBufferLUT_RG, texture_buffer_lut_rg.handle, GL_RG32F, 1);
++    allocate_lut(TextureUnits::TextureBufferLUT_RGBA, texture_buffer_lut_rgba.handle, GL_RGBA32F,
++                 1);
++#else
+     glActiveTexture(TextureUnits::TextureBufferLUT_LF.Enum());
+     glTexBuffer(GL_TEXTURE_BUFFER, GL_RG32F, texture_lf_buffer.GetHandle());
+     glActiveTexture(TextureUnits::TextureBufferLUT_RG.Enum());
+@@ -473,8 +619,38 @@ bool RasterizerOpenGL::SetupGeometryShader() {
+ 
+ bool RasterizerOpenGL::AccelerateDrawBatch(bool is_indexed) {
+ #if defined(__EMSCRIPTEN__)
+-    (void)is_indexed;
+-    return false;
++    // Per-fragment lighting relies on the fixed quaternion geometry shader.
++    // Geometry shaders are unavailable in WebGL 2, so only accelerate batches
++    // whose generated vertex shader can connect directly to the fragment stage.
++    if (!regs.lighting.disable) {
++        RecordWebGLDrawResult(WebGLDrawResult::LightingFallback, regs.pipeline.num_vertices,
++                              is_indexed);
++        return false;
++    }
++
++    if (regs.pipeline.use_gs != Pica::PipelineRegs::UseGS::No) {
++        RecordWebGLDrawResult(WebGLDrawResult::PipelineFallback, regs.pipeline.num_vertices,
++                              is_indexed);
++        return false;
++    }
++
++    if (!SetupVertexShader()) {
++        RecordWebGLDrawResult(WebGLDrawResult::VertexShaderFallback,
++                              regs.pipeline.num_vertices, is_indexed);
++        return false;
++    }
++
++    if (!SetupGeometryShader()) {
++        RecordWebGLDrawResult(WebGLDrawResult::GeometryShaderFallback,
++                              regs.pipeline.num_vertices, is_indexed);
++        return false;
++    }
++
++    const bool accelerated = Draw(true, is_indexed);
++    RecordWebGLDrawResult(accelerated ? WebGLDrawResult::Accelerated
++                                     : WebGLDrawResult::DrawFallback,
++                          regs.pipeline.num_vertices, is_indexed);
++    return accelerated;
+ #else
+     if (regs.pipeline.use_gs != Pica::PipelineRegs::UseGS::No) {
+         if (regs.pipeline.gs_config.mode != Pica::PipelineRegs::GSMode::Point) {
+@@ -507,7 +683,11 @@ bool RasterizerOpenGL::AccelerateDrawBatchInternal(bool is_indexed) {
+     }
+ 
+     state.draw.vertex_buffer = vertex_buffer.GetHandle();
++#if !defined(__EMSCRIPTEN__)
++    // Native stream buffers map the currently-bound GL buffer. WebGL writes to the CPU shadow
++    // first, and SetupVertexArray applies the required VAO/VBO state before the upload is used.
+     state.Apply();
++#endif
+ 
+     u8* buffer_ptr;
+     GLintptr buffer_offset;
+@@ -531,13 +711,40 @@ bool RasterizerOpenGL::AccelerateDrawBatchInternal(bool is_indexed) {
+             memory.GetPhysicalPointer(regs.pipeline.vertex_attributes.GetPhysicalBaseAddress() +
+                                       regs.pipeline.index_array.offset);
+         std::tie(buffer_ptr, buffer_offset, std::ignore) = index_buffer.Map(index_buffer_size, 4);
++#if defined(__EMSCRIPTEN__)
++        // WebGL 2 does not expose a base-vertex draw call. Rebase the copied
++        // indices instead so vertex zero addresses the first uploaded vertex.
++        if (vs_input_index_min == 0) {
++            // Most games already use zero-based batches. Avoid a scalar WebAssembly loop in the
++            // hot draw path and let the optimized memcpy implementation copy the indices.
++            std::memcpy(buffer_ptr, index_data, index_buffer_size);
++        } else if (index_u16) {
++            const u16* source = reinterpret_cast<const u16*>(index_data);
++            u16* destination = reinterpret_cast<u16*>(buffer_ptr);
++            for (u32 index = 0; index < regs.pipeline.num_vertices; ++index) {
++                destination[index] = static_cast<u16>(source[index] - vs_input_index_min);
++            }
++        } else {
++            for (u32 index = 0; index < regs.pipeline.num_vertices; ++index) {
++                buffer_ptr[index] = static_cast<u8>(index_data[index] - vs_input_index_min);
++            }
++        }
++#else
+         std::memcpy(buffer_ptr, index_data, index_buffer_size);
++#endif
+         index_buffer.Unmap(index_buffer_size);
+ 
++#if defined(__EMSCRIPTEN__)
++        glDrawRangeElements(primitive_mode, 0, vs_input_index_max - vs_input_index_min,
++                            regs.pipeline.num_vertices,
++                            index_u16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE,
++                            reinterpret_cast<const void*>(buffer_offset));
++#else
+         glDrawRangeElementsBaseVertex(
+             primitive_mode, vs_input_index_min, vs_input_index_max, regs.pipeline.num_vertices,
+             index_u16 ? GL_UNSIGNED_SHORT : GL_UNSIGNED_BYTE,
+             reinterpret_cast<const void*>(buffer_offset), -static_cast<GLint>(vs_input_index_min));
++#endif
+     } else {
+         glDrawArrays(primitive_mode, 0, regs.pipeline.num_vertices);
+     }
+@@ -639,7 +846,8 @@ bool RasterizerOpenGL::Draw(bool accelerate, bool is_indexed) {
+         curr_shader_manager->ApplyTo(state, accurate_mul);
+         state.Apply();
+ 
+-        std::size_t max_vertices = 3 * (VERTEX_BUFFER_SIZE / (3 * sizeof(HardwareVertex)));
++        const std::size_t max_vertices =
++            3 * (vertex_buffer.GetSize() / (3 * sizeof(HardwareVertex)));
+         for (std::size_t base_vertex = 0; base_vertex < vertex_batch.size();
+              base_vertex += max_vertices) {
+             const std::size_t vertices = std::min(max_vertices, vertex_batch.size() - base_vertex);
+@@ -888,6 +1096,35 @@ void RasterizerOpenGL::SyncAndUploadLUTsLF() {
+         return;
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    // Buffer textures are not part of WebGL 2. Repack this small, rarely-changing data set into a
++    // fixed 2D texture. Repacking all entries keeps offsets stable and avoids a CPU/GPU ring buffer
++    // plus an otherwise-useless ARRAY_BUFFER upload on every LUT update.
++    std::array<Common::Vec2f, WEBGL_LUT_WIDTH * WEBGL_LUT_LF_HEIGHT> upload{};
++    std::size_t entry_offset = 0;
++
++    for (u32 index = 0; index < Pica::LightingRegs::NumLightingSampler; ++index) {
++        const auto& source_lut = pica.lighting.luts[index];
++        for (u32 i = 0; i < source_lut.size(); ++i) {
++            upload[entry_offset + i] = {source_lut[i].ToFloat(), source_lut[i].DiffToFloat()};
++        }
++        fs_data.lighting_lut_offset[index / 4][index % 4] = static_cast<int>(entry_offset);
++        entry_offset += source_lut.size();
++    }
++    pica.lighting.lut_dirty = 0;
++
++    for (u32 i = 0; i < pica.fog.lut.size(); ++i) {
++        upload[entry_offset + i] = {pica.fog.lut[i].ToFloat(), pica.fog.lut[i].DiffToFloat()};
++    }
++    fs_data.fog_lut_offset = static_cast<int>(entry_offset);
++    pica.fog.lut_dirty = false;
++    fs_data_dirty = true;
++
++    glActiveTexture(TextureUnits::TextureBufferLUT_LF.Enum());
++    glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_lf.handle);
++    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(WEBGL_LUT_WIDTH),
++                    static_cast<GLsizei>(WEBGL_LUT_LF_HEIGHT), GL_RG, GL_FLOAT, upload.data());
++#else
+     std::size_t bytes_used = 0;
+     glBindBuffer(GL_TEXTURE_BUFFER, texture_lf_buffer.GetHandle());
+     const auto [buffer, offset, invalidate] =
+@@ -927,6 +1164,7 @@ void RasterizerOpenGL::SyncAndUploadLUTsLF() {
+     }
+ 
+     texture_lf_buffer.Unmap(bytes_used);
++#endif
+ }
+ 
+ void RasterizerOpenGL::SyncAndUploadLUTs() {
+@@ -939,6 +1177,47 @@ void RasterizerOpenGL::SyncAndUploadLUTs() {
+         return;
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    // The native renderer aliases one byte buffer through RG32F and RGBA32F views. WebGL cannot
++    // create such views, so build the two compact texture representations directly.
++    std::array<Common::Vec2f, WEBGL_LUT_WIDTH> upload_rg{};
++    std::array<Common::Vec4f, WEBGL_LUT_WIDTH> upload_rgba{};
++    std::size_t rg_offset = 0;
++
++    const auto pack_value_lut = [&](const auto& lut, GLint& lut_offset) {
++        lut_offset = static_cast<GLint>(rg_offset);
++        for (u32 i = 0; i < lut.size(); ++i) {
++            upload_rg[rg_offset + i] = {lut[i].ToFloat(), lut[i].DiffToFloat()};
++        }
++        rg_offset += lut.size();
++    };
++
++    pack_value_lut(pica.proctex.noise_table, fs_data.proctex_noise_lut_offset);
++    pack_value_lut(pica.proctex.color_map_table, fs_data.proctex_color_map_offset);
++    pack_value_lut(pica.proctex.alpha_map_table, fs_data.proctex_alpha_map_offset);
++
++    fs_data.proctex_lut_offset = 0;
++    for (u32 i = 0; i < pica.proctex.color_table.size(); ++i) {
++        upload_rgba[i] = pica.proctex.color_table[i].ToVector() / 255.0f;
++    }
++    fs_data.proctex_diff_lut_offset = static_cast<GLint>(pica.proctex.color_table.size());
++    for (u32 i = 0; i < pica.proctex.color_diff_table.size(); ++i) {
++        upload_rgba[fs_data.proctex_diff_lut_offset + i] =
++            pica.proctex.color_diff_table[i].ToVector() / 255.0f;
++    }
++
++    glActiveTexture(TextureUnits::TextureBufferLUT_RG.Enum());
++    glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_rg.handle);
++    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(WEBGL_LUT_WIDTH), 1, GL_RG,
++                    GL_FLOAT, upload_rg.data());
++    glActiveTexture(TextureUnits::TextureBufferLUT_RGBA.Enum());
++    glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_rgba.handle);
++    glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, static_cast<GLsizei>(WEBGL_LUT_WIDTH), 1, GL_RGBA,
++                    GL_FLOAT, upload_rgba.data());
++
++    pica.proctex.table_dirty = 0;
++    fs_data_dirty = true;
++#else
+     std::size_t bytes_used = 0;
+     glBindBuffer(GL_TEXTURE_BUFFER, texture_buffer.GetHandle());
+     const auto [buffer, offset, invalidate] = texture_buffer.Map(max_size, sizeof(Common::Vec4f));
+@@ -1000,6 +1279,7 @@ void RasterizerOpenGL::SyncAndUploadLUTs() {
+     pica.proctex.table_dirty = 0;
+ 
+     texture_buffer.Unmap(bytes_used);
++#endif
+ }
+ 
+ void RasterizerOpenGL::UploadUniforms(bool accelerate_draw) {
+diff --git a/src/video_core/renderer_opengl/gl_shader_manager.cpp b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+index 786fb3f..e1f089e 100644
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -9,6 +9,9 @@
+ #include <thread>
+ #include <unordered_map>
+ #include <variant>
++#if defined(__EMSCRIPTEN__)
++#include <emscripten.h>
++#endif
+ #include "common/hash.h"
+ #include "common/settings.h"
+ #include "core/frontend/emu_window.h"
+@@ -251,14 +254,104 @@ private:
+     std::unordered_map<u64, OGLShaderStage> shader_cache;
+ };
+ 
++// Fragment shader configurations contain the complete PICA state needed to regenerate a shader.
++// Some of that state is inactive for a particular configuration, however, and therefore multiple
++// configurations can generate byte-identical GLSL. Compiling those duplicates is especially
++// expensive on WebGL, where ANGLE has to translate every new shader before it can be cached by the
++// browser. Keep both an effective-config cache and a generated-source cache to avoid that work.
++class FragmentShaderCache {
++public:
++    explicit FragmentShaderCache(bool separable_) : separable{separable_} {}
++
++    std::tuple<u64, GLuint, std::optional<std::string>, bool> Get(
++        const FSConfig& config, const Pica::Shader::UserConfig& user,
++        const Pica::Shader::Profile& profile) {
++        ++lookups;
++
++        const u64 config_hash = GetEffectiveConfigHash(config, user.raw, profile);
++        const auto map_it = shader_map.find(config_hash);
++        if (map_it != shader_map.end()) {
++            return {config_hash, map_it->second->GetHandle(), std::nullopt, false};
++        }
++
++        ++config_misses;
++        auto source = Common::HashableString(GLSL::GenerateFragmentShader(config, user, profile));
++        const u64 source_hash = source.Hash();
++        auto [source_it, new_source] =
++            shader_cache.emplace(source_hash, OGLShaderStage{separable});
++        OGLShaderStage& cached_shader = source_it->second;
++        std::optional<std::string> result;
++        if (new_source) {
++            ++source_misses;
++            result = std::move(source);
++            cached_shader.Create(result->c_str(), GL_FRAGMENT_SHADER);
++        } else {
++            ++source_hits;
++        }
++
++        shader_map.emplace(config_hash, &cached_shader);
++        return {config_hash, cached_shader.GetHandle(), std::move(result), true};
++    }
++
++    void Inject(const FSConfig& key, std::string_view source, const Pica::Shader::Profile& profile,
++                OGLProgram&& program) {
++        OGLShaderStage stage{separable};
++        stage.Inject(std::move(program));
++        Inject(key, source, profile, std::move(stage));
++    }
++
++    void Inject(const FSConfig& key, std::string_view source, const Pica::Shader::Profile& profile,
++                OGLShaderStage&& stage) {
++        const u64 source_identity = Common::ComputeHash64(source.data(), source.size());
++        const auto source_it = shader_cache.emplace(source_identity, std::move(stage)).first;
++        shader_map.insert_or_assign(GetEffectiveConfigHash(key, u32{}, profile),
++                                    &source_it->second);
++    }
++
++    u64 Lookups() const {
++        return lookups;
++    }
++
++    u64 ConfigMisses() const {
++        return config_misses;
++    }
++
++    u64 SourceMisses() const {
++        return source_misses;
++    }
++
++    u64 SourceHits() const {
++        return source_hits;
++    }
++
++private:
++    static u64 GetEffectiveConfigHash(const FSConfig& config, u32 user_config,
++                                      const Pica::Shader::Profile& profile) {
++        FSConfig effective_config{config};
++        effective_config.ApplyProfile(profile);
++
++        // These fields are inputs to ApplyProfile only. Once the effective state has been
++        // calculated they do not affect generated GLSL and must not create cache variants.
++        effective_config.framebuffer.requested_logic_op = {};
++        effective_config.texture.requested_wrap = {};
++        return Common::HashCombine(effective_config.Hash(), static_cast<u64>(user_config));
++    }
++
++    bool separable;
++    u64 lookups{};
++    u64 config_misses{};
++    u64 source_misses{};
++    u64 source_hits{};
++    std::unordered_map<u64, OGLShaderStage*> shader_map;
++    std::unordered_map<u64, OGLShaderStage> shader_cache;
++};
++
+ using ProgrammableVertexShaders =
+     ShaderDoubleCache<PicaVSConfig, ExtraVSConfig, &GLSL::GenerateVertexShader, GL_VERTEX_SHADER>;
+ 
+ using FixedGeometryShaders =
+     ShaderCache<PicaFixedGSConfig, &GLSL::GenerateFixedGeometryShader, GL_GEOMETRY_SHADER>;
+ 
+-using FragmentShaders = ShaderCache<FSConfig, &GLSL::GenerateFragmentShader, GL_FRAGMENT_SHADER>;
+-
+ class ShaderProgramManager::Impl {
+ public:
+     explicit Impl(const Driver& driver, u64 title_id, bool separable)
+@@ -324,10 +417,33 @@ public:
+ 
+     FixedGeometryShaders fixed_geometry_shaders;
+ 
+-    FragmentShaders fragment_shaders;
++    FragmentShaderCache fragment_shaders;
+     std::unordered_map<u64, OGLProgram> program_cache;
+     OGLPipeline pipeline;
+     ShaderDiskCache disk_cache;
++    u64 program_lookups{};
++    u64 program_misses{};
++
++    void PublishCacheStats() const {
++#if defined(__EMSCRIPTEN__)
++        EM_ASM({
++            const stats = {};
++            stats.fragmentLookups = $0;
++            stats.fragmentConfigMisses = $1;
++            stats.fragmentSourceMisses = $2;
++            stats.fragmentSourceHits = $3;
++            stats.programLookups = $4;
++            stats.programMisses = $5;
++            stats.programCount = $6;
++            globalThis.__AZAHAR_SHADER_CACHE__ = stats;
++        }, static_cast<double>(fragment_shaders.Lookups()),
++               static_cast<double>(fragment_shaders.ConfigMisses()),
++               static_cast<double>(fragment_shaders.SourceMisses()),
++               static_cast<double>(fragment_shaders.SourceHits()),
++               static_cast<double>(program_lookups), static_cast<double>(program_misses),
++               static_cast<double>(program_cache.size()));
++#endif
++    }
+ 
+     Pica::Shader::Generator::ExtraVSConfig CalcExtraConfig(
+         const Pica::Shader::Generator::PicaVSConfig& config, bool accurate_mul) {
+@@ -409,11 +525,15 @@ void ShaderProgramManager::UseTrivialGeometryShader() {
+ void ShaderProgramManager::UseFragmentShader(const Pica::RegsInternal& regs,
+                                              const Pica::Shader::UserConfig& user) {
+     const FSConfig fs_config{regs};
+-    auto [hash, handle, result] = impl->fragment_shaders.Get(fs_config, user, impl->profile);
++    auto [hash, handle, result, new_config] =
++        impl->fragment_shaders.Get(fs_config, user, impl->profile);
+     impl->current.fs = handle;
+     impl->current.fs_hash = hash;
++    if (new_config) {
++        impl->PublishCacheStats();
++    }
+     // Save FS to the disk cache if its a new shader
+-    if (result) {
++    if (result && user.IsCacheable()) {
+         auto& disk_cache = impl->disk_cache;
+         u64 unique_identifier = GetUniqueIdentifier(regs, {});
+         ShaderDiskCacheRaw raw{unique_identifier, ProgramType::FS, regs, {}};
+@@ -436,13 +556,25 @@ void ShaderProgramManager::ApplyTo(OpenGLState& state, bool accurate_mul) {
+         state.draw.shader_program = 0;
+         state.draw.program_pipeline = impl->pipeline.handle;
+     } else {
++        ++impl->program_lookups;
++#if defined(__EMSCRIPTEN__)
++        // WebGL cannot persist OpenGL program binaries. Key the in-memory program cache by the
++        // actual shader-stage objects so equivalent PICA configurations sharing generated GLSL
++        // also share the linked program.
++        const u64 unique_identifier = Common::HashCombine(
++            u64{}, static_cast<u64>(impl->current.vs), static_cast<u64>(impl->current.gs),
++            static_cast<u64>(impl->current.fs));
++#else
+         const u64 unique_identifier = impl->current.GetConfigHash();
++#endif
+         OGLProgram& cached_program = impl->program_cache[unique_identifier];
+         if (cached_program.handle == 0) {
++            ++impl->program_misses;
+             cached_program.Create(false,
+                                   std::array{impl->current.vs, impl->current.gs, impl->current.fs});
+             auto& disk_cache = impl->disk_cache;
+             disk_cache.SaveDumpToFile(unique_identifier, cached_program.handle, accurate_mul);
++            impl->PublishCacheStats();
+         }
+         state.draw.shader_program = cached_program.handle;
+     }
+@@ -537,7 +669,8 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
+                     // TODO: Support UserConfig in disk shader cache
+                     const FSConfig conf(raw.GetRawShaderConfig());
+                     std::scoped_lock lock(mutex);
+-                    impl->fragment_shaders.Inject(conf, std::move(shader));
++                    impl->fragment_shaders.Inject(conf, decomp->second.code, impl->profile,
++                                                  std::move(shader));
+                 } else {
+                     // Unsupported shader type got stored somehow so nuke the cache
+ 
+@@ -653,7 +786,7 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
+                 stage.Create(code.c_str(), GL_FRAGMENT_SHADER);
+                 handle = stage.GetHandle();
+                 std::scoped_lock lock(mutex);
+-                impl->fragment_shaders.Inject(fs_config, std::move(stage));
++                impl->fragment_shaders.Inject(fs_config, code, impl->profile, std::move(stage));
+             } else {
+                 // Unsupported shader type got stored somehow so nuke the cache
+                 LOG_ERROR(Frontend, "failed to load raw ProgramType {}", raw.GetProgramType());
+diff --git a/src/video_core/renderer_opengl/gl_state.cpp b/src/video_core/renderer_opengl/gl_state.cpp
+index ab0659e..62a8e6d 100644
+--- a/src/video_core/renderer_opengl/gl_state.cpp
++++ b/src/video_core/renderer_opengl/gl_state.cpp
+@@ -223,20 +223,32 @@ void OpenGLState::Apply() const {
+     // Texture buffer LUTs
+     if (texture_buffer_lut_lf.texture_buffer != cur_state.texture_buffer_lut_lf.texture_buffer) {
+         glActiveTexture(TextureUnits::TextureBufferLUT_LF.Enum());
++#if defined(__EMSCRIPTEN__)
++        glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_lf.texture_buffer);
++#else
+         glBindTexture(GL_TEXTURE_BUFFER, texture_buffer_lut_lf.texture_buffer);
++#endif
+     }
+ 
+     // Texture buffer LUTs
+     if (texture_buffer_lut_rg.texture_buffer != cur_state.texture_buffer_lut_rg.texture_buffer) {
+         glActiveTexture(TextureUnits::TextureBufferLUT_RG.Enum());
++#if defined(__EMSCRIPTEN__)
++        glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_rg.texture_buffer);
++#else
+         glBindTexture(GL_TEXTURE_BUFFER, texture_buffer_lut_rg.texture_buffer);
++#endif
+     }
+ 
+     // Texture buffer LUTs
+     if (texture_buffer_lut_rgba.texture_buffer !=
+         cur_state.texture_buffer_lut_rgba.texture_buffer) {
+         glActiveTexture(TextureUnits::TextureBufferLUT_RGBA.Enum());
++#if defined(__EMSCRIPTEN__)
++        glBindTexture(GL_TEXTURE_2D, texture_buffer_lut_rgba.texture_buffer);
++#else
+         glBindTexture(GL_TEXTURE_BUFFER, texture_buffer_lut_rgba.texture_buffer);
++#endif
+     }
+ 
+     // Color buffer
+diff --git a/src/video_core/renderer_opengl/gl_stream_buffer.cpp b/src/video_core/renderer_opengl/gl_stream_buffer.cpp
+index 440815e..6f1a214 100644
+--- a/src/video_core/renderer_opengl/gl_stream_buffer.cpp
++++ b/src/video_core/renderer_opengl/gl_stream_buffer.cpp
+@@ -71,6 +71,8 @@ GLsizeiptr OGLStreamBuffer::GetSize() const {
+ 
+ std::tuple<u8*, GLintptr, bool> OGLStreamBuffer::Map(GLsizeiptr size, GLintptr alignment) {
+ #if defined(__EMSCRIPTEN__)
++    bool invalidate = false;
++    mapped_invalidate = false;
+     if (size > buffer_size) {
+         glBindBuffer(gl_target, gl_buffer.handle);
+         glBufferData(gl_target, size, nullptr, GL_STREAM_DRAW);
+@@ -78,6 +80,7 @@ std::tuple<u8*, GLintptr, bool> OGLStreamBuffer::Map(GLsizeiptr size, GLintptr a
+         shadow.assign(static_cast<std::size_t>(size), 0);
+         mapped_ptr = shadow.data();
+         buffer_pos = 0;
++        invalidate = true;
+     }
+     mapped_size = size;
+ 
+@@ -85,10 +88,10 @@ std::tuple<u8*, GLintptr, bool> OGLStreamBuffer::Map(GLsizeiptr size, GLintptr a
+         buffer_pos = Common::AlignUp<std::size_t>(buffer_pos, alignment);
+     }
+ 
+-    bool invalidate = false;
+     if (buffer_pos + size > buffer_size) {
+         buffer_pos = 0;
+         invalidate = true;
++        mapped_invalidate = true;
+     }
+     mapped_offset = buffer_pos;
+     return std::make_tuple(shadow.data() + buffer_pos, buffer_pos, invalidate);
+@@ -128,8 +131,15 @@ std::tuple<u8*, GLintptr, bool> OGLStreamBuffer::Map(GLsizeiptr size, GLintptr a
+ void OGLStreamBuffer::Unmap(GLsizeiptr size) {
+     ASSERT(size <= mapped_size);
+ #if defined(__EMSCRIPTEN__)
++    glBindBuffer(gl_target, gl_buffer.handle);
++    if (mapped_invalidate) {
++        // Allocate fresh backing storage when the ring wraps. Without orphaning, ANGLE must wait
++        // for earlier draws that still consume the range at offset zero, causing a persistent
++        // upload stall once object-heavy scenes fill the stream buffer for the first time.
++        glBufferData(gl_target, buffer_size, nullptr, GL_STREAM_DRAW);
++        mapped_invalidate = false;
++    }
+     if (size > 0) {
+-        glBindBuffer(gl_target, gl_buffer.handle);
+         glBufferSubData(gl_target, buffer_pos, size, shadow.data() + buffer_pos);
+     }
+     buffer_pos += size;
+diff --git a/src/video_core/renderer_opengl/gl_stream_buffer.h b/src/video_core/renderer_opengl/gl_stream_buffer.h
+index b6e0c0b..00f800b 100644
+--- a/src/video_core/renderer_opengl/gl_stream_buffer.h
++++ b/src/video_core/renderer_opengl/gl_stream_buffer.h
+@@ -49,6 +49,7 @@ private:
+     // CPU shadow used in place of glMapBufferRange (WebGL2 lacks the
+     // unsynchronized/persistent map subset we depend on).
+     std::vector<u8> shadow;
++    bool mapped_invalidate = false;
+ #endif
+ };
+ 
+diff --git a/src/video_core/renderer_opengl/gl_texture_runtime.cpp b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+index e193f56..eeddfc8 100644
+--- a/src/video_core/renderer_opengl/gl_texture_runtime.cpp
++++ b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+@@ -696,12 +696,23 @@ Framebuffer::~Framebuffer() = default;
+ Sampler::Sampler(TextureRuntime&, VideoCore::SamplerParams params) {
+     const GLenum mag_filter = PicaToGL::TextureMagFilterMode(params.mag_filter);
+     const GLenum min_filter = PicaToGL::TextureMinFilterMode(params.min_filter, params.mip_filter);
+-    const GLenum wrap_s = PicaToGL::WrapMode(params.wrap_s);
+-    const GLenum wrap_t = PicaToGL::WrapMode(params.wrap_t);
++    GLenum wrap_s = PicaToGL::WrapMode(params.wrap_s);
++    GLenum wrap_t = PicaToGL::WrapMode(params.wrap_t);
+     const Common::Vec4f gl_color = PicaToGL::ColorRGBA8(params.border_color);
+     const auto lod_min = static_cast<float>(params.lod_min);
+     const auto lod_max = static_cast<float>(params.lod_max);
+ 
++#if defined(__EMSCRIPTEN__)
++    // The fragment shader emulates the requested border color. Clamp the host sampler to the
++    // nearest supported mode so WebGL does not reject the sampler object.
++    if (wrap_s == GL_CLAMP_TO_BORDER) {
++        wrap_s = GL_CLAMP_TO_EDGE;
++    }
++    if (wrap_t == GL_CLAMP_TO_BORDER) {
++        wrap_t = GL_CLAMP_TO_EDGE;
++    }
++#endif
++
+     sampler.Create();
+ 
+     const GLuint handle = sampler.handle;
+@@ -711,7 +722,11 @@ Sampler::Sampler(TextureRuntime&, VideoCore::SamplerParams params) {
+     glSamplerParameteri(handle, GL_TEXTURE_WRAP_S, wrap_s);
+     glSamplerParameteri(handle, GL_TEXTURE_WRAP_T, wrap_t);
+ 
++#if !defined(__EMSCRIPTEN__)
+     glSamplerParameterfv(handle, GL_TEXTURE_BORDER_COLOR, gl_color.AsArray());
++#else
++    (void)gl_color;
++#endif
+ 
+     glSamplerParameterf(handle, GL_TEXTURE_MIN_LOD, lod_min);
+     glSamplerParameterf(handle, GL_TEXTURE_MAX_LOD, lod_max);
+diff --git a/src/video_core/renderer_opengl/renderer_opengl.cpp b/src/video_core/renderer_opengl/renderer_opengl.cpp
+index a776e1a..5dd793f 100644
+--- a/src/video_core/renderer_opengl/renderer_opengl.cpp
++++ b/src/video_core/renderer_opengl/renderer_opengl.cpp
+@@ -42,6 +42,19 @@ struct ScreenRectVertex {
+     std::array<GLfloat, 2> tex_coord{};
+ };
+ 
++#if defined(__EMSCRIPTEN__)
++GLint GetPresentShaderSwizzle(Pica::PixelFormat format) {
++    switch (format) {
++    case Pica::PixelFormat::RGB8:
++        return 1;
++    case Pica::PixelFormat::RGBA8:
++        return 2;
++    default:
++        return 0;
++    }
++}
++#endif
++
+ /**
+  * Defines a 1:1 pixel ortographic projection matrix with (0,0) on the top-left
+  * corner and (width, height) on the lower-bottom.
+@@ -272,6 +285,9 @@ void RendererOpenGL::LoadFBToScreenInfo(const Pica::FramebufferConfig& framebuff
+     // only allows rows to have a memory alignement of 4.
+     ASSERT(pixel_stride % 4 == 0);
+ 
++    // Cached surfaces and LCD fill colors are already in host channel order. Only raw
++    // framebuffer uploads need the WebGL shader to decode their guest byte order.
++    screen_info.display_color_swizzle = 0;
+     if (color_fill.is_enabled ||
+         !rasterizer.AccelerateDisplay(framebuffer, framebuffer_addr, static_cast<u32>(pixel_stride),
+                                       screen_info)) {
+@@ -281,6 +297,11 @@ void RendererOpenGL::LoadFBToScreenInfo(const Pica::FramebufferConfig& framebuff
+         // Reset the screen info's display texture to its own permanent texture
+         screen_info.display_texture = screen_info.texture.resource.handle;
+         screen_info.display_texcoords = Common::Rectangle<f32>(0.f, 0.f, 1.f, 1.f);
++#if defined(__EMSCRIPTEN__)
++        if (!color_fill.is_enabled) {
++            screen_info.display_color_swizzle = GetPresentShaderSwizzle(screen_info.texture.format);
++        }
++#endif
+ 
+         rasterizer.FlushRegion(framebuffer_addr, framebuffer.stride * framebuffer.height);
+ 
+@@ -416,6 +437,8 @@ void RendererOpenGL::ReloadShader(Settings::StereoRenderOption render_3d) {
+     state.Apply();
+     uniform_modelview_matrix = glGetUniformLocation(shader.handle, "modelview_matrix");
+     uniform_color_texture = glGetUniformLocation(shader.handle, "color_texture");
++    uniform_color_swizzle = glGetUniformLocation(shader.handle, "color_swizzle");
++    uniform_color_swizzle_r = glGetUniformLocation(shader.handle, "color_swizzle_r");
+     if (render_3d == Settings::StereoRenderOption::Anaglyph ||
+         render_3d == Settings::StereoRenderOption::Interlaced ||
+         render_3d == Settings::StereoRenderOption::ReverseInterlaced) {
+@@ -501,18 +524,6 @@ void RendererOpenGL::ConfigureFramebufferTexture(TextureInfo& texture,
+     glTexImage2D(GL_TEXTURE_2D, 0, internal_format, width, height, 0, texture.gl_format,
+                  texture.gl_type, nullptr);
+ 
+-#if defined(__EMSCRIPTEN__)
+-    if (format == Pica::PixelFormat::RGB8) {
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_BLUE);
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_RED);
+-    } else if (format == Pica::PixelFormat::RGBA8) {
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_R, GL_ALPHA);
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_G, GL_BLUE);
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_B, GL_GREEN);
+-        glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_SWIZZLE_A, GL_RED);
+-    }
+-#endif
+-
+     state.texture_units[0].texture_2d = 0;
+     state.Apply();
+ }
+@@ -573,6 +584,9 @@ void RendererOpenGL::DrawSingleScreen(const ScreenInfo& screen_info, float x, fl
+                 1.0f / static_cast<float>(screen_info.texture.width * scale_factor),
+                 1.0f / static_cast<float>(screen_info.texture.height * scale_factor));
+     glUniform4f(uniform_o_resolution, h, w, 1.0f / h, 1.0f / w);
++#if defined(__EMSCRIPTEN__)
++    glUniform1i(uniform_color_swizzle, screen_info.display_color_swizzle);
++#endif
+     state.texture_units[0].texture_2d = screen_info.display_texture;
+     state.texture_units[0].sampler = sampler;
+     state.Apply();
+@@ -644,6 +658,10 @@ void RendererOpenGL::DrawSingleScreenStereo(const ScreenInfo& screen_info_l,
+                 1.0f / static_cast<float>(screen_info_l.texture.width * scale_factor),
+                 1.0f / static_cast<float>(screen_info_l.texture.height * scale_factor));
+     glUniform4f(uniform_o_resolution, h, w, 1.0f / h, 1.0f / w);
++#if defined(__EMSCRIPTEN__)
++    glUniform1i(uniform_color_swizzle, screen_info_l.display_color_swizzle);
++    glUniform1i(uniform_color_swizzle_r, screen_info_r.display_color_swizzle);
++#endif
+     state.texture_units[0].texture_2d = screen_info_l.display_texture;
+     state.texture_units[1].texture_2d = screen_info_r.display_texture;
+     state.texture_units[0].sampler = sampler;
+diff --git a/src/video_core/renderer_opengl/renderer_opengl.h b/src/video_core/renderer_opengl/renderer_opengl.h
+index 2f2b318..03c715f 100644
+--- a/src/video_core/renderer_opengl/renderer_opengl.h
++++ b/src/video_core/renderer_opengl/renderer_opengl.h
+@@ -35,6 +35,7 @@ struct TextureInfo {
+ /// Structure used for storing information about the display target for each 3DS screen
+ struct ScreenInfo {
+     GLuint display_texture;
++    GLint display_color_swizzle = 0;
+     Common::Rectangle<float> display_texcoords;
+     TextureInfo texture;
+ };
+@@ -101,6 +102,8 @@ private:
+     GLuint uniform_modelview_matrix;
+     GLuint uniform_color_texture;
+     GLuint uniform_color_texture_r;
++    GLint uniform_color_swizzle;
++    GLint uniform_color_swizzle_r;
+ 
+     // Shader uniform for Dolphin compatibility
+     GLuint uniform_i_resolution;
+diff --git a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+index 4007d02..b1d37f0 100644
+--- a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
++++ b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+@@ -12,7 +12,14 @@ using ProcTexCombiner = TexturingRegs::ProcTexCombiner;
+ using ProcTexFilter = TexturingRegs::ProcTexFilter;
+ using TextureType = Pica::TexturingRegs::TextureConfig::TextureType;
+ 
++#if defined(__EMSCRIPTEN__)
++// Generated PICA fragment shaders are normally tens of KiB. Reserving 8 MiB for every transient
++// shader source forces needless WebAssembly heap growth during scene shader bursts. The string can
++// still grow normally for an unusually large shader.
++constexpr static std::size_t RESERVE_SIZE = 128 * 1024;
++#else
+ constexpr static std::size_t RESERVE_SIZE = 8 * 1024 * 1024;
++#endif
+ 
+ enum class Semantic : u32 {
+     Position,
+@@ -1343,7 +1350,9 @@ void FragmentModule::DefineBindingsGL() {
+     out += "uniform sampler2D texture_buffer_lut_lf;\n";
+     out += "uniform sampler2D texture_buffer_lut_rg;\n";
+     out += "uniform sampler2D texture_buffer_lut_rgba;\n";
+-    out += "#define texelFetchBuf(s, i) texelFetch((s), ivec2((i), 0), 0)\n";
++    // WebGL 2 has no buffer textures. Store the linear LUTs in 2048-wide 2D textures, which is
++    // supported by every WebGL 2 implementation, and keep all existing linear offsets intact.
++    out += "#define texelFetchBuf(s, i) texelFetch((s), ivec2((i) & 2047, (i) >> 11), 0)\n";
+     out += "float fma(float a, float b, float c) { return a * b + c; }\n";
+     out += "vec2 fma(vec2 a, vec2 b, vec2 c) { return a * b + c; }\n";
+     out += "vec3 fma(vec3 a, vec3 b, vec3 c) { return a * b + c; }\n";
+diff --git a/src/video_core/shader/generator/glsl_shader_decompiler.cpp b/src/video_core/shader/generator/glsl_shader_decompiler.cpp
+index eca3513..26975c1 100644
+--- a/src/video_core/shader/generator/glsl_shader_decompiler.cpp
++++ b/src/video_core/shader/generator/glsl_shader_decompiler.cpp
+@@ -24,6 +24,16 @@ using nihstro::SwizzlePattern;
+ 
+ constexpr u32 PROGRAM_END = MAX_PROGRAM_CODE_LENGTH;
+ 
++#if defined(__EMSCRIPTEN__)
++// ANGLE/D3D11 can fail draw-time compilation of unsigned switch dispatchers.
++// PICA instruction offsets fit in a signed int without changing jump semantics.
++constexpr std::string_view JUMP_TARGET_TYPE = "int";
++constexpr std::string_view JUMP_TARGET_SUFFIX = "";
++#else
++constexpr std::string_view JUMP_TARGET_TYPE = "uint";
++constexpr std::string_view JUMP_TARGET_SUFFIX = "u";
++#endif
++
+ class DecompileFail : public std::runtime_error {
+ public:
+     using std::runtime_error::runtime_error;
+@@ -678,8 +688,8 @@ private:
+ 
+                 shader.AddLine("if ({}) {{", condition);
+                 ++shader.scope;
+-                shader.AddLine("{{ jmp_to = {}u; break; }}",
+-                               instr.flow_control.dest_offset.Value());
++                shader.AddLine("{{ jmp_to = {}{}; break; }}",
++                               instr.flow_control.dest_offset.Value(), JUMP_TARGET_SUFFIX);
+ 
+                 --shader.scope;
+                 shader.AddLine("}}");
+@@ -825,11 +835,33 @@ private:
+ 
+     void Generate() {
+         if (sanitize_mul) {
++#if defined(__EMSCRIPTEN__)
++            // ANGLE's D3D backend can retry large generated shaders several times when GLSL
++            // isnan() is lowered to HLSL. Test the IEEE-754 bit pattern instead. This preserves
++            // the PICA rule below while avoiding the expensive D3D compiler fallback path.
++            shader.AddLine("bvec4 pica_isnan(vec4 value) {{");
++            ++shader.scope;
++            shader.AddLine("uvec4 magnitude = floatBitsToUint(value) & uvec4(0x7fffffffu);");
++            shader.AddLine("return greaterThan(magnitude, uvec4(0x7f800000u));");
++            --shader.scope;
++            shader.AddLine("}}\n");
++#endif
+             shader.AddLine("vec4 sanitize_mul(vec4 lhs, vec4 rhs) {{");
+             ++shader.scope;
+             shader.AddLine("vec4 product = lhs * rhs;");
++#if defined(__EMSCRIPTEN__)
++            shader.AddLine("bvec4 product_nan = pica_isnan(product);");
++            shader.AddLine("bvec4 lhs_nan = pica_isnan(lhs);");
++            shader.AddLine("bvec4 rhs_nan = pica_isnan(rhs);");
++            shader.AddLine(
++                "bvec4 replace_nan = bvec4(product_nan.x && !lhs_nan.x && !rhs_nan.x, "
++                "product_nan.y && !lhs_nan.y && !rhs_nan.y, product_nan.z && !lhs_nan.z && "
++                "!rhs_nan.z, product_nan.w && !lhs_nan.w && !rhs_nan.w);");
++            shader.AddLine("return mix(product, vec4(0.0), replace_nan);");
++#else
+             shader.AddLine("return mix(product, mix(mix(vec4(0.0), product, isnan(rhs)), product, "
+                            "isnan(lhs)), isnan(product));");
++#endif
+             --shader.scope;
+             shader.AddLine("}}\n");
+         }
+@@ -876,14 +908,15 @@ private:
+                 }
+             } else {
+                 labels.insert(subroutine.begin);
+-                shader.AddLine("uint jmp_to = {}u;", subroutine.begin);
++                shader.AddLine("{} jmp_to = {}{};", JUMP_TARGET_TYPE, subroutine.begin,
++                               JUMP_TARGET_SUFFIX);
+                 shader.AddLine("while (true) {{");
+                 ++shader.scope;
+ 
+                 shader.AddLine("switch (jmp_to) {{");
+ 
+                 for (auto label : labels) {
+-                    shader.AddLine("case {}u: {{", label);
++                    shader.AddLine("case {}{}: {{", label, JUMP_TARGET_SUFFIX);
+                     ++shader.scope;
+ 
+                     auto next_it = labels.lower_bound(label + 1);
+@@ -892,7 +925,8 @@ private:
+                     u32 compile_end = CompileRange(label, next_label);
+                     if (compile_end > next_label && compile_end != PROGRAM_END) {
+                         // This happens only when there is a label inside a IF/LOOP block
+-                        shader.AddLine("{{ jmp_to = {}u; break; }}", compile_end);
++                        shader.AddLine("{{ jmp_to = {}{}; break; }}", compile_end,
++                                       JUMP_TARGET_SUFFIX);
+                         labels.emplace(compile_end);
+                     }
+ 
+diff --git a/src/video_core/shader/generator/pica_fs_config.cpp b/src/video_core/shader/generator/pica_fs_config.cpp
+index 0f3854c..d11ab67 100644
+--- a/src/video_core/shader/generator/pica_fs_config.cpp
++++ b/src/video_core/shader/generator/pica_fs_config.cpp
+@@ -86,9 +86,14 @@ TextureConfig::TextureConfig(const Pica::TexturingRegs& regs) {
+ 
+ void TextureConfig::ApplyProfile(const Profile& profile) {
+     // Emulate custom border color if needed and not supported.
++#if !defined(__EMSCRIPTEN__)
+     if (profile.has_custom_border_color) {
+         return;
+     }
++#else
++    // WebGL 2 does not expose clamp-to-border or custom sampler border colors.
++    (void)profile;
++#endif
+ 
+     for (u32 i = 0; i < 3; i++) {
+         texture_border_color[i].enable_s.Assign(
+diff --git a/src/video_core/shader/shader_interpreter.cpp b/src/video_core/shader/shader_interpreter.cpp
+index cb06a62..005e1ec 100644
+--- a/src/video_core/shader/shader_interpreter.cpp
++++ b/src/video_core/shader/shader_interpreter.cpp
+@@ -5,9 +5,11 @@
+ #include <algorithm>
+ #include <cmath>
+ #include <numeric>
+-#include <boost/circular_buffer.hpp>
+ #include <boost/container/static_vector.hpp>
+ #include <nihstro/shader_bytecode.h>
++#ifdef __EMSCRIPTEN__
++#include <emscripten.h>
++#endif
+ #include "common/assert.h"
+ #include "common/common_types.h"
+ #include "common/logging/log.h"
+@@ -17,6 +19,8 @@
+ #include "video_core/pica/shader_unit.h"
+ #include "video_core/pica_types.h"
+ #include "video_core/shader/shader_interpreter.h"
++#include "video_core/shader/shader_interpreter_decoded.h"
++#include "video_core/shader/shader_stack.h"
+ 
+ using nihstro::Instruction;
+ using nihstro::OpCode;
+@@ -26,6 +30,26 @@ using nihstro::SwizzlePattern;
+ 
+ namespace Pica::Shader {
+ 
++template <bool Decoded, typename Operation>
++static void ForEachDestination(const SwizzlePattern& swizzle, Operation&& operation) {
++    if constexpr (Decoded) {
++        // Full vector writes avoid four independent mask tests and can be vectorized. Partial
++        // writes retain their exact component masks, including an empty destination mask.
++        if (swizzle.dest_mask.Value() == 0xf) {
++            operation(0);
++            operation(1);
++            operation(2);
++            operation(3);
++            return;
++        }
++    }
++    for (unsigned i = 0; i < 4; ++i) {
++        if (swizzle.DestComponentEnabled(i)) {
++            operation(i);
++        }
++    }
++}
++
+ struct IfStackElement {
+     u32 else_address;
+     u32 end_address;
+@@ -44,12 +68,12 @@ struct LoopStackElement {
+     u8 previous_aL;
+ };
+ 
+-template <bool Debug>
++template <bool Debug, bool Decoded = false>
+ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                            DebugData<Debug>& debug_data, unsigned entry_point) {
+-    boost::circular_buffer<IfStackElement> if_stack(8);
+-    boost::circular_buffer<CallStackElement> call_stack(4);
+-    boost::circular_buffer<LoopStackElement> loop_stack(4);
++    ShaderStack<IfStackElement, 8> if_stack;
++    ShaderStack<CallStackElement, 4> call_stack;
++    ShaderStack<LoopStackElement, 4> loop_stack;
+     u32 program_counter = entry_point;
+ 
+     const auto do_if = [&](Instruction instr, bool condition) {
+@@ -107,6 +131,10 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+     const auto& uniforms = setup.uniforms;
+     const auto& swizzle_data = setup.GetSwizzleData();
+     const auto& program_code = setup.GetProgramCode();
++    // Shader programs cannot change while one vertex is executing. Keep the cache identity
++    // outside the instruction loop, even when a cold instruction is decoded lazily.
++    auto* const decoded_program = setup.interpreter_cache.program.get();
++    const u64 decoded_version = setup.interpreter_cache.version;
+ 
+     // Constants for handling invalid inputs
+     static f24 dummy_vec4_float24_zeros[4] = {f24::Zero(), f24::Zero(), f24::Zero(), f24::Zero()};
+@@ -127,19 +155,35 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         // program counter wraps around after reaching the last instruction,
+         // but more testing is needed.
+         Instruction instr{};
+-        if (program_counter < MAX_PROGRAM_CODE_LENGTH - 1) {
+-            instr.hex = program_code[program_counter];
++        SwizzlePattern swizzle{};
++        const DecodedInstruction* decoded = nullptr;
++        if constexpr (Decoded) {
++            auto& entry = decoded_program->instructions[
++                std::min(program_counter, MAX_PROGRAM_CODE_LENGTH - 1)];
++            if (entry.version != decoded_version) [[unlikely]] {
++                DecodeInstruction(entry, setup, program_counter);
++            }
++            decoded = &entry;
++            instr.hex = entry.instruction.hex;
++            swizzle.hex = entry.swizzle.hex;
+         } else {
+-            instr.opcode.Assign(OpCode::Id::END);
++            if (program_counter < MAX_PROGRAM_CODE_LENGTH - 1) {
++                instr.hex = program_code[program_counter];
++            } else {
++                instr.opcode.Assign(OpCode::Id::END);
++            }
++            swizzle.hex = swizzle_data[instr.common.operand_desc_id];
+         }
+-
+-        const SwizzlePattern swizzle = {swizzle_data[instr.common.operand_desc_id]};
++        const auto opcode = Decoded ? decoded->opcode : instr.opcode.Value().EffectiveOpCode();
++        const auto type = Decoded ? decoded->type : instr.opcode.Value().GetInfo().type;
+ 
+         Record<DebugDataRecord::CUR_INSTR>(debug_data, iteration, program_counter);
+         if (iteration > 0)
+             Record<DebugDataRecord::NEXT_INSTR>(debug_data, iteration - 1, program_counter);
+ 
+-        debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
++        if constexpr (Debug || !Decoded) {
++            debug_data.max_offset = std::max<u32>(debug_data.max_offset, 1 + program_counter);
++        }
+ 
+         auto LookupSourceRegister = [&](const SourceRegister& source_reg,
+                                         int address_register_index) -> const f24* {
+@@ -171,66 +215,72 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             }
+         };
+ 
+-        switch (instr.opcode.Value().GetInfo().type) {
++        switch (type) {
+         case OpCode::Type::Arithmetic: {
+-            const bool is_inverted =
+-                (0 != (instr.opcode.Value().GetInfo().subtype & OpCode::Info::SrcInversed));
+-
+-            const f24* src1_ =
+-                LookupSourceRegister(instr.common.GetSrc1(is_inverted),
+-                                     !is_inverted * instr.common.address_register_index);
+-            const f24* src2_ =
+-                LookupSourceRegister(instr.common.GetSrc2(is_inverted),
+-                                     is_inverted * instr.common.address_register_index);
+-
+-            const bool negate_src1 = swizzle.negate_src1.Value() != 0;
+-            const bool negate_src2 = swizzle.negate_src2.Value() != 0;
+-
+-            f24 src1[4] = {
+-                src1_[(int)swizzle.src1_selector_0.Value()],
+-                src1_[(int)swizzle.src1_selector_1.Value()],
+-                src1_[(int)swizzle.src1_selector_2.Value()],
+-                src1_[(int)swizzle.src1_selector_3.Value()],
+-            };
+-            if (negate_src1) {
+-                src1[0] = -src1[0];
+-                src1[1] = -src1[1];
+-                src1[2] = -src1[2];
+-                src1[3] = -src1[3];
+-            }
+-            f24 src2[4] = {
+-                src2_[(int)swizzle.src2_selector_0.Value()],
+-                src2_[(int)swizzle.src2_selector_1.Value()],
+-                src2_[(int)swizzle.src2_selector_2.Value()],
+-                src2_[(int)swizzle.src2_selector_3.Value()],
+-            };
+-            if (negate_src2) {
+-                src2[0] = -src2[0];
+-                src2[1] = -src2[1];
+-                src2[2] = -src2[2];
+-                src2[3] = -src2[3];
+-            }
++            f24 src1[4];
++            f24 src2[4];
++            f24* dest;
++            if constexpr (Decoded) {
++                LoadDecodedSource(setup, state, decoded->sources[0], src1);
++                if (decoded->has_src2) {
++                    LoadDecodedSource(setup, state, decoded->sources[1], src2);
++                }
++                dest = reinterpret_cast<f24*>(reinterpret_cast<u8*>(&state) + decoded->destination);
++            } else {
++                const bool is_inverted =
++                    (0 != (instr.opcode.Value().GetInfo().subtype & OpCode::Info::SrcInversed));
++
++                const f24* src1_ =
++                    LookupSourceRegister(instr.common.GetSrc1(is_inverted),
++                                         !is_inverted * instr.common.address_register_index);
++                const f24* src2_ =
++                    LookupSourceRegister(instr.common.GetSrc2(is_inverted),
++                                         is_inverted * instr.common.address_register_index);
++
++                const bool negate_src1 = swizzle.negate_src1.Value() != 0;
++                const bool negate_src2 = swizzle.negate_src2.Value() != 0;
++
++                src1[0] = src1_[(int)swizzle.src1_selector_0.Value()];
++                src1[1] = src1_[(int)swizzle.src1_selector_1.Value()];
++                src1[2] = src1_[(int)swizzle.src1_selector_2.Value()];
++                src1[3] = src1_[(int)swizzle.src1_selector_3.Value()];
++                if (negate_src1) {
++                    src1[0] = -src1[0];
++                    src1[1] = -src1[1];
++                    src1[2] = -src1[2];
++                    src1[3] = -src1[3];
++                }
++                src2[0] = src2_[(int)swizzle.src2_selector_0.Value()];
++                src2[1] = src2_[(int)swizzle.src2_selector_1.Value()];
++                src2[2] = src2_[(int)swizzle.src2_selector_2.Value()];
++                src2[3] = src2_[(int)swizzle.src2_selector_3.Value()];
++                if (negate_src2) {
++                    src2[0] = -src2[0];
++                    src2[1] = -src2[1];
++                    src2[2] = -src2[2];
++                    src2[3] = -src2[3];
++                }
+ 
+-            f24* dest = (instr.common.dest.Value() < 0x10)
+-                            ? &state.output[instr.common.dest.Value().GetIndex()][0]
+-                        : (instr.common.dest.Value() < 0x20)
+-                            ? &state.temporary[instr.common.dest.Value().GetIndex()][0]
+-                            : dummy_vec4_float24_zeros;
++                dest = (instr.common.dest.Value() < 0x10)
++                                ? &state.output[instr.common.dest.Value().GetIndex()][0]
++                            : (instr.common.dest.Value() < 0x20)
++                                ? &state.temporary[instr.common.dest.Value().GetIndex()][0]
++                                : dummy_vec4_float24_zeros;
++            }
+ 
+-            debug_data.max_opdesc_id =
+-                std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            if constexpr (Debug || !Decoded) {
++                debug_data.max_opdesc_id =
++                    std::max<u32>(debug_data.max_opdesc_id, 1 + instr.common.operand_desc_id);
++            }
+ 
+-            switch (instr.opcode.Value().EffectiveOpCode()) {
++            switch (opcode) {
+             case OpCode::Id::ADD: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = src1[i] + src2[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -239,12 +289,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = src1[i] * src2[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -252,12 +299,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::FLR:
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = f24::FromFloat32(std::floor(src1[i].ToFloat32()));
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -265,15 +309,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   max(0, NaN) -> NaN
+                     //   max(NaN, 0) -> 0
+                     dest[i] = (src1[i] > src2[i]) ? src1[i] : src2[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -281,15 +322,12 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     // NOTE: Exact form required to match NaN semantics to hardware:
+                     //   min(0, NaN) -> NaN
+                     //   min(NaN, 0) -> 0
+                     dest[i] = (src1[i] < src2[i]) ? src1[i] : src2[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -301,19 +339,15 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+ 
+-                OpCode::Id opcode = instr.opcode.Value().EffectiveOpCode();
+                 if (opcode == OpCode::Id::DPH || opcode == OpCode::Id::DPHI)
+                     src1[3] = f24::One();
+ 
+                 int num_components = (opcode == OpCode::Id::DP3) ? 3 : 4;
+                 f24 dot = std::inner_product(src1, src1 + num_components, src2, f24::Zero());
+ 
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = dot;
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -323,12 +357,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rcp_res = f24::FromFloat32(1.0f / src1[0].ToFloat32());
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = rcp_res;
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -338,12 +369,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+                 f24 rsq_res = f24::FromFloat32(1.0f / std::sqrt(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = rsq_res;
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -365,12 +393,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+             case OpCode::Id::MOV: {
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = src1[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+             }
+@@ -380,12 +405,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = (src1[i] >= src2[i]) ? f24::One() : f24::Zero();
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -394,12 +416,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = (src1[i] < src2[i]) ? f24::One() : f24::Zero();
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+ 
+@@ -451,12 +470,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // EX2 only takes first component exp2 and writes it to all dest components
+                 f24 ex2_res = f24::FromFloat32(std::exp2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = ex2_res;
+-                }
++                });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -468,12 +484,9 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+ 
+                 // LG2 only takes the first component log2 and writes it to all dest components
+                 f24 lg2_res = f24::FromFloat32(std::log2(src1[0].ToFloat32()));
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = lg2_res;
+-                }
++                });
+ 
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+                 break;
+@@ -491,77 +504,81 @@ static void RunInterpreter(const ShaderSetup& setup, ShaderUnit& state,
+         }
+ 
+         case OpCode::Type::MultiplyAdd: {
+-            if ((instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MAD) ||
+-                (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI)) {
+-                const SwizzlePattern& mad_swizzle = *reinterpret_cast<const SwizzlePattern*>(
+-                    &swizzle_data[instr.mad.operand_desc_id]);
+-
+-                bool is_inverted = (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI);
++            if (opcode == OpCode::Id::MAD || opcode == OpCode::Id::MADI) {
++                f24 src1[4];
++                f24 src2[4];
++                f24 src3[4];
++                f24* dest;
++                if constexpr (Decoded) {
++                    LoadDecodedSource(setup, state, decoded->sources[0], src1);
++                    LoadDecodedSource(setup, state, decoded->sources[1], src2);
++                    LoadDecodedSource(setup, state, decoded->sources[2], src3);
++                    dest = reinterpret_cast<f24*>(reinterpret_cast<u8*>(&state) + decoded->destination);
++                } else {
++                    const SwizzlePattern& mad_swizzle = *reinterpret_cast<const SwizzlePattern*>(
++                        &swizzle_data[instr.mad.operand_desc_id]);
++
++                    bool is_inverted = (instr.opcode.Value().EffectiveOpCode() == OpCode::Id::MADI);
++
++                    const f24* src1_ = LookupSourceRegister(instr.mad.GetSrc1(is_inverted), 0);
++                    const f24* src2_ =
++                        LookupSourceRegister(instr.mad.GetSrc2(is_inverted),
++                                             !is_inverted * instr.mad.address_register_index);
++                    const f24* src3_ = LookupSourceRegister(
++                        instr.mad.GetSrc3(is_inverted), is_inverted * instr.mad.address_register_index);
++
++                    const bool negate_src1 = mad_swizzle.negate_src1.Value() != 0;
++                    const bool negate_src2 = mad_swizzle.negate_src2.Value() != 0;
++                    const bool negate_src3 = mad_swizzle.negate_src3.Value() != 0;
++
++                    src1[0] = src1_[(int)mad_swizzle.src1_selector_0.Value()];
++                    src1[1] = src1_[(int)mad_swizzle.src1_selector_1.Value()];
++                    src1[2] = src1_[(int)mad_swizzle.src1_selector_2.Value()];
++                    src1[3] = src1_[(int)mad_swizzle.src1_selector_3.Value()];
++                    if (negate_src1) {
++                        src1[0] = -src1[0];
++                        src1[1] = -src1[1];
++                        src1[2] = -src1[2];
++                        src1[3] = -src1[3];
++                    }
++                    src2[0] = src2_[(int)mad_swizzle.src2_selector_0.Value()];
++                    src2[1] = src2_[(int)mad_swizzle.src2_selector_1.Value()];
++                    src2[2] = src2_[(int)mad_swizzle.src2_selector_2.Value()];
++                    src2[3] = src2_[(int)mad_swizzle.src2_selector_3.Value()];
++                    if (negate_src2) {
++                        src2[0] = -src2[0];
++                        src2[1] = -src2[1];
++                        src2[2] = -src2[2];
++                        src2[3] = -src2[3];
++                    }
++                    src3[0] = src3_[(int)mad_swizzle.src3_selector_0.Value()];
++                    src3[1] = src3_[(int)mad_swizzle.src3_selector_1.Value()];
++                    src3[2] = src3_[(int)mad_swizzle.src3_selector_2.Value()];
++                    src3[3] = src3_[(int)mad_swizzle.src3_selector_3.Value()];
++                    if (negate_src3) {
++                        src3[0] = -src3[0];
++                        src3[1] = -src3[1];
++                        src3[2] = -src3[2];
++                        src3[3] = -src3[3];
++                    }
+ 
+-                const f24* src1_ = LookupSourceRegister(instr.mad.GetSrc1(is_inverted), 0);
+-                const f24* src2_ =
+-                    LookupSourceRegister(instr.mad.GetSrc2(is_inverted),
+-                                         !is_inverted * instr.mad.address_register_index);
+-                const f24* src3_ = LookupSourceRegister(
+-                    instr.mad.GetSrc3(is_inverted), is_inverted * instr.mad.address_register_index);
+-
+-                const bool negate_src1 = mad_swizzle.negate_src1.Value() != 0;
+-                const bool negate_src2 = mad_swizzle.negate_src2.Value() != 0;
+-                const bool negate_src3 = mad_swizzle.negate_src3.Value() != 0;
+-
+-                f24 src1[4] = {
+-                    src1_[(int)mad_swizzle.src1_selector_0.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_1.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_2.Value()],
+-                    src1_[(int)mad_swizzle.src1_selector_3.Value()],
+-                };
+-                if (negate_src1) {
+-                    src1[0] = -src1[0];
+-                    src1[1] = -src1[1];
+-                    src1[2] = -src1[2];
+-                    src1[3] = -src1[3];
++                    dest = (instr.mad.dest.Value() < 0x10)
++                                    ? &state.output[instr.mad.dest.Value().GetIndex()][0]
++                                : (instr.mad.dest.Value() < 0x20)
++                                    ? &state.temporary[instr.mad.dest.Value().GetIndex()][0]
++                                    : dummy_vec4_float24_zeros;
+                 }
+-                f24 src2[4] = {
+-                    src2_[(int)mad_swizzle.src2_selector_0.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_1.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_2.Value()],
+-                    src2_[(int)mad_swizzle.src2_selector_3.Value()],
+-                };
+-                if (negate_src2) {
+-                    src2[0] = -src2[0];
+-                    src2[1] = -src2[1];
+-                    src2[2] = -src2[2];
+-                    src2[3] = -src2[3];
+-                }
+-                f24 src3[4] = {
+-                    src3_[(int)mad_swizzle.src3_selector_0.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_1.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_2.Value()],
+-                    src3_[(int)mad_swizzle.src3_selector_3.Value()],
+-                };
+-                if (negate_src3) {
+-                    src3[0] = -src3[0];
+-                    src3[1] = -src3[1];
+-                    src3[2] = -src3[2];
+-                    src3[3] = -src3[3];
+-                }
+-
+-                f24* dest = (instr.mad.dest.Value() < 0x10)
+-                                ? &state.output[instr.mad.dest.Value().GetIndex()][0]
+-                            : (instr.mad.dest.Value() < 0x20)
+-                                ? &state.temporary[instr.mad.dest.Value().GetIndex()][0]
+-                                : dummy_vec4_float24_zeros;
+ 
++                if constexpr (!Decoded) {
++                    swizzle.hex = swizzle_data[instr.mad.operand_desc_id];
++                }
+                 Record<DebugDataRecord::SRC1>(debug_data, iteration, src1);
+                 Record<DebugDataRecord::SRC2>(debug_data, iteration, src2);
+                 Record<DebugDataRecord::SRC3>(debug_data, iteration, src3);
+                 Record<DebugDataRecord::DEST_IN>(debug_data, iteration, dest);
+-                for (int i = 0; i < 4; ++i) {
+-                    if (!mad_swizzle.DestComponentEnabled(i))
+-                        continue;
+-
++                ForEachDestination<Decoded>(swizzle, [&](unsigned i) {
+                     dest[i] = src1[i] * src2[i] + src3[i];
+-                }
++                });
+                 Record<DebugDataRecord::DEST_OUT>(debug_data, iteration, dest);
+             } else {
+                 LOG_ERROR(HW_GPU, "Unhandled multiply-add instruction: 0x{:02x} ({}): 0x{:08x}",
+@@ -738,6 +755,13 @@ void InterpreterEngine::SetupBatch(ShaderSetup& setup, unsigned int entry_point)
+     ASSERT(entry_point < MAX_PROGRAM_CODE_LENGTH);
+     setup.DoProgramCodeFixup();
+     setup.entry_point = entry_point;
++#if defined(__EMSCRIPTEN__)
++    if (!setup.interpreter_cache.program) {
++        setup.interpreter_cache.program = std::make_unique<DecodedProgram>();
++        // Publish once per cache allocation, never inside the per-vertex hot path.
++        EM_ASM({ globalThis.__AZAHAR_SHADER_INTERPRETER__ = "operand-fastpaths-v1"; });
++    }
++#endif
+ }
+ 
+ MICROPROFILE_DEFINE(GPU_Shader, "GPU", "Shader", MP_RGB(50, 50, 240));
+@@ -747,6 +771,12 @@ void InterpreterEngine::Run(const ShaderSetup& setup, ShaderUnit& state) const {
+     MICROPROFILE_SCOPE(GPU_Shader);
+ 
+     DebugData<false> dummy_debug_data;
++#if defined(__EMSCRIPTEN__)
++    if (setup.interpreter_cache.program) {
++        RunInterpreter<false, true>(setup, state, dummy_debug_data, setup.entry_point);
++        return;
++    }
++#endif
+     RunInterpreter(setup, state, dummy_debug_data, setup.entry_point);
+ }
+ 
+diff --git a/src/video_core/pica/vertex_cache.h b/src/video_core/pica/vertex_cache.h
+new file mode 100644
+index 0000000..c798335
+--- /dev/null
++++ b/src/video_core/pica/vertex_cache.h
+@@ -0,0 +1,56 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++
++#pragma once
++
++#include <array>
++#include <cstdint>
++
++namespace Pica {
++
++// A lookup hint accelerates hits without changing the fully associative FIFO replacement
++// policy. Collisions and stale hints fall back to the original search over resident vertices.
++class VertexCacheIndex {
++public:
++    static constexpr unsigned Capacity = 64;
++    static constexpr unsigned Missing = Capacity;
++
++    unsigned Find(std::uint16_t vertex) {
++        const unsigned hash = Hash(vertex);
++        const unsigned hint = hints[hash];
++        if (hint < count && vertices[hint] == vertex) {
++            return hint;
++        }
++        for (unsigned i = 0; i < count; ++i) {
++            if (vertices[i] == vertex) {
++                hints[hash] = static_cast<std::uint8_t>(i);
++                return i;
++            }
++        }
++        return Missing;
++    }
++
++    unsigned Insert(std::uint16_t vertex) {
++        const unsigned slot = next;
++        vertices[slot] = vertex;
++        hints[Hash(vertex)] = static_cast<std::uint8_t>(slot);
++        next = (next + 1) % Capacity;
++        if (count < Capacity) {
++            ++count;
++        }
++        return slot;
++    }
++
++private:
++    static constexpr unsigned Hash(std::uint16_t vertex) {
++        return (vertex ^ (vertex >> 8)) & 0xff;
++    }
++
++    std::array<std::uint16_t, Capacity> vertices;
++    std::array<std::uint8_t, 256> hints{};
++    unsigned next = 0;
++    unsigned count = 0;
++};
++
++} // namespace Pica
+diff --git a/src/video_core/shader/shader_stack.h b/src/video_core/shader/shader_stack.h
+new file mode 100644
+index 0000000..bec104a
+--- /dev/null
++++ b/src/video_core/shader/shader_stack.h
+@@ -0,0 +1,52 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++
++#pragma once
++
++#include <array>
++#include <cstddef>
++#include <type_traits>
++
++namespace Pica::Shader {
++
++// Preserve the interpreter's overwrite-oldest behavior on overflow. Inline storage avoids
++// allocating three circular buffers for every vertex processed by the interpreter.
++template <typename T, std::size_t Capacity>
++class ShaderStack {
++    static_assert(Capacity > 0 && (Capacity & (Capacity - 1)) == 0);
++    static_assert(std::is_trivial_v<T>);
++
++public:
++    void push_back(const T& value) {
++        entries[next] = value;
++        next = (next + 1) & (Capacity - 1);
++        if (count < Capacity) {
++            ++count;
++        }
++    }
++
++    void pop_back() {
++        next = (next + Capacity - 1) & (Capacity - 1);
++        --count;
++    }
++
++    T& back() {
++        return entries[(next + Capacity - 1) & (Capacity - 1)];
++    }
++
++    bool empty() const {
++        return count == 0;
++    }
++
++    std::size_t size() const {
++        return count;
++    }
++
++private:
++    std::array<T, Capacity> entries;
++    std::size_t next = 0;
++    std::size_t count = 0;
++};
++
++} // namespace Pica::Shader
+diff --git a/src/video_core/shader/shader_interpreter_decoded.h b/src/video_core/shader/shader_interpreter_decoded.h
+new file mode 100644
+index 0000000..9ab4532
+--- /dev/null
++++ b/src/video_core/shader/shader_interpreter_decoded.h
+@@ -0,0 +1,139 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <nihstro/shader_bytecode.h>
++#include "common/common_types.h"
++#include "video_core/pica/shader_setup.h"
++#include "video_core/pica/shader_unit.h"
++
++namespace Pica::Shader {
++
++// Cache instruction decoding, never uniform values or per-vertex register contents.
++struct DecodedSource {
++    u16 offset;
++    u8 address_register;
++    bool uniform;
++    std::array<u8, 4> selectors;
++    bool negate;
++    bool identity;
++    bool broadcast;
++};
++
++struct DecodedInstruction {
++    u64 version = 0;
++    nihstro::Instruction instruction;
++    nihstro::SwizzlePattern swizzle;
++    nihstro::OpCode::Type type;
++    nihstro::OpCode::Id opcode;
++    std::array<DecodedSource, 3> sources;
++    u16 destination;
++    bool has_src2;
++};
++
++struct DecodedProgram {
++    std::array<DecodedInstruction, MAX_PROGRAM_CODE_LENGTH> instructions;
++};
++
++inline DecodedSource DecodeSource(nihstro::SourceRegister source, u32 address_register,
++                                 const nihstro::SwizzlePattern& swizzle, unsigned operand) {
++    const bool uniform = source.GetRegisterType() == nihstro::RegisterType::FloatUniform;
++    const auto offset = uniform ? Uniforms::GetFloatUniformOffset(source.GetIndex())
++                        : source.GetRegisterType() == nihstro::RegisterType::Input
++                            ? ShaderUnit::InputOffset(source.GetIndex())
++                            : ShaderUnit::TemporaryOffset(source.GetIndex());
++    DecodedSource result{};
++    result.offset = static_cast<u16>(offset);
++    result.uniform = uniform;
++    result.address_register = uniform ? static_cast<u8>(address_register) : 0;
++    const unsigned selector = swizzle.GetRawSelector(operand);
++    for (unsigned i = 0; i < 4; ++i) {
++        result.selectors[i] = (selector >> (6 - i * 2)) & 3;
++    }
++    result.negate = operand == 1 ? swizzle.negate_src1.Value()
++                    : operand == 2 ? swizzle.negate_src2.Value()
++                                   : swizzle.negate_src3.Value();
++    result.identity = selector == 0x1b;
++    result.broadcast = (selector & 0x3f) == ((selector >> 2) & 0x3f);
++    return result;
++}
++
++inline void DecodeInstruction(DecodedInstruction& decoded, const ShaderSetup& setup, u32 pc) {
++    using OpCode = nihstro::OpCode;
++    nihstro::Instruction instr{};
++    // Match the original interpreter's malformed-shader guard, including an entry beyond the end.
++    if (pc < MAX_PROGRAM_CODE_LENGTH - 1) {
++        instr.hex = setup.GetProgramCode()[pc];
++    } else {
++        instr.opcode.Assign(OpCode::Id::END);
++    }
++    decoded.instruction = instr;
++    decoded.type = instr.opcode.Value().GetInfo().type;
++    decoded.opcode = instr.opcode.Value().EffectiveOpCode();
++    const bool mad = decoded.type == OpCode::Type::MultiplyAdd;
++    decoded.swizzle.hex = setup.GetSwizzleData()[mad ? instr.mad.operand_desc_id.Value()
++                                                   : instr.common.operand_desc_id.Value()];
++    if (decoded.type == OpCode::Type::Arithmetic || mad) {
++        decoded.has_src2 = mad || (instr.opcode.Value().GetInfo().subtype & OpCode::Info::Src2);
++        const bool inverted = instr.opcode.Value().GetInfo().subtype & OpCode::Info::SrcInversed;
++        const auto& swizzle = decoded.swizzle;
++        const u32 address_register = mad ? instr.mad.address_register_index.Value()
++                                        : instr.common.address_register_index.Value();
++        decoded.sources[0] =
++            DecodeSource(mad ? instr.mad.GetSrc1(inverted) : instr.common.GetSrc1(inverted),
++                         !mad && !inverted ? address_register : 0, swizzle, 1);
++        decoded.sources[1] =
++            DecodeSource(mad ? instr.mad.GetSrc2(inverted) : instr.common.GetSrc2(inverted),
++                         mad != inverted ? address_register : 0, swizzle, 2);
++        if (mad) {
++            decoded.sources[2] = DecodeSource(instr.mad.GetSrc3(inverted),
++                                             inverted ? address_register : 0, swizzle, 3);
++        }
++        const auto dest = mad ? instr.mad.dest.Value() : instr.common.dest.Value();
++        decoded.destination =
++            static_cast<u16>(dest < 0x10 ? ShaderUnit::OutputOffset(dest.GetIndex())
++                                        : ShaderUnit::TemporaryOffset(dest.GetIndex()));
++    }
++    decoded.version = setup.interpreter_cache.version;
++}
++
++inline void LoadDecodedSource(const ShaderSetup& setup, const ShaderUnit& state,
++                              const DecodedSource& source, f24 (&result)[4]) {
++    static constexpr std::array<f24, 4> ones{f24::One(), f24::One(), f24::One(), f24::One()};
++    // A direct uniform register is always in range. Resolve both ordinary register banks with
++    // a byte offset; only relative uniforms need wrapping and the hardware's out-of-range ones.
++    const auto* base = source.uniform ? reinterpret_cast<const u8*>(&setup.uniforms)
++                                      : reinterpret_cast<const u8*>(&state);
++    const f24* values = reinterpret_cast<const f24*>(base + source.offset);
++    if (source.address_register) {
++        unsigned index = source.offset / sizeof(Common::Vec4<f24>);
++        int offset = state.address_registers[source.address_register - 1];
++        if (offset < -128 || offset > 127) {
++            offset = 0;
++        }
++        index = (index + offset) & 0x7f;
++        values = index < 96 ? &setup.uniforms.f[index].x : ones.data();
++    }
++    if (source.identity) {
++        for (unsigned i = 0; i < 4; ++i) {
++            result[i] = source.negate ? -values[i] : values[i];
++        }
++    } else if (source.broadcast) {
++        const f24 value = source.negate ? -values[source.selectors[0]]
++                                        : values[source.selectors[0]];
++        std::fill(std::begin(result), std::end(result), value);
++    } else {
++        for (unsigned i = 0; i < 4; ++i) {
++            result[i] = values[source.selectors[i]];
++            if (source.negate) {
++                result[i] = -result[i];
++            }
++        }
++    }
++}
++
++} // namespace Pica::Shader

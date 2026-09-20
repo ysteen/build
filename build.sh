@@ -102,10 +102,14 @@ buildThreadsLegacy() {
 }
 
 cmakeBuildThreads() {
-    rm -rf "$cmakeBuildDir"
-    mkdir -p "$cmakeBuildDir"
-    cd "$cmakeBuildDir"
-    emcmake cmake .. "${cmakeArgsArray[@]}" || exit 1
+    if [ "${INCREMENTAL_CMAKE:-0}" = "1" ] && [ -f "$cmakeBuildDir/CMakeCache.txt" ]; then
+        cd "$cmakeBuildDir"
+    else
+        rm -rf "$cmakeBuildDir"
+        mkdir -p "$cmakeBuildDir"
+        cd "$cmakeBuildDir"
+        emcmake cmake .. "${cmakeArgsArray[@]}" || exit 1
+    fi
     emmake make -j$(nproc) || exit 1
 
     if [ -n "$archivesString" ]; then
@@ -153,11 +157,11 @@ if [ "$listAllCores" = false ]; then
         git pull
     fi
 
-    savestatePatch="$initialPath/patches/emulatorjs-savestate-memory.patch"
-    if git apply --check "$savestatePatch" 2>/dev/null; then
-        git apply "$savestatePatch"
-    elif ! git apply --reverse --check "$savestatePatch" 2>/dev/null; then
-        echo "Unable to apply EmulatorJS save-state memory patch" >&2
+    runtimePatch="$initialPath/patches/retroarch-emulatorjs-runtime.patch"
+    if git apply --check "$runtimePatch" 2>/dev/null; then
+        git apply "$runtimePatch"
+    elif ! git apply --reverse --check "$runtimePatch" 2>/dev/null; then
+        echo "Unable to apply EmulatorJS runtime patch" >&2
         exit 1
     fi
 
@@ -209,11 +213,11 @@ compileProject() {
     fi
 
     if [ "$name" = "azahar" ]; then
-        azaharPatch="$initialPath/patches/azahar-emscripten-geometry.patch"
-        if git apply --check "$azaharPatch" 2>/dev/null; then
-            git apply "$azaharPatch"
-        elif ! git apply --reverse --check "$azaharPatch" 2>/dev/null; then
-            echo "Unable to apply Azahar Emscripten geometry patch" >&2
+        azaharPerformancePatch="$initialPath/patches/azahar-wasm-performance.patch"
+        if git apply --check "$azaharPerformancePatch" 2>/dev/null; then
+            git apply "$azaharPerformancePatch"
+        elif ! git apply --reverse --check "$azaharPerformancePatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebAssembly performance patch" >&2
             exit 1
         fi
     fi
@@ -396,7 +400,11 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
 
         proxyArg=""
         if [ "$name" = "dosbox_pure" ]; then
-        proxyArg="--proxy-to-pthread --light-debug"
+            proxyArg="--proxy-to-pthread --light-debug"
+        elif [ "$name" = "azahar" ] && [ "${AZAHAR_PROXY_TO_PTHREAD:-0}" = "1" ]; then
+            proxyArg="--proxy-to-pthread"
+        elif [ "$name" = "azahar" ]; then
+            proxyArg="--min-async"
         fi
 
         if [[ "$custom" = "true" ]]; then
@@ -404,23 +412,23 @@ for row in $(jq -r '.[] | @base64' ../cores.json); do
         else
             if [ "$requireThreads" = false ]; then
                 mv core-temp/normal/*.bc ./
-                emmake ./build-emulatorjs.sh --clean >> "$logPath/$name-emake.log"
+                emmake ./build-emulatorjs.sh --clean >> "$logPath/$name-emake.log" || exit 1
                 rm -f *.bc
 
                 if [ "$requiresWebgl2" = false ]; then
                     mv core-temp/legacy/*.bc ./
-                    emmake ./build-emulatorjs.sh --clean --legacy >> "$logPath/$name-emake.log"
+                    emmake ./build-emulatorjs.sh --clean --legacy >> "$logPath/$name-emake.log" || exit 1
                     rm -f *.bc
                 fi
             fi
 
             mv core-temp/threads/*.bc ./
-            emmake ./build-emulatorjs.sh --clean --threads $proxyArg >> "$logPath/$name-emake.log"
+            emmake ./build-emulatorjs.sh --clean --threads $proxyArg >> "$logPath/$name-emake.log" || exit 1
             rm -f *.bc
 
             if [ "$requiresWebgl2" = false ]; then
                 mv core-temp/legacyThreads/*.bc ./
-                emmake ./build-emulatorjs.sh --clean --threads --legacy $proxyArg >> "$logPath/$name-emake.log"
+                emmake ./build-emulatorjs.sh --clean --threads --legacy $proxyArg >> "$logPath/$name-emake.log" || exit 1
                 rm -f *.bc
             fi
 
