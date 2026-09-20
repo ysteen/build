@@ -1,0 +1,415 @@
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+index 9228e16..f8d3610 100644
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -103,6 +103,11 @@ add_library(video_core STATIC
+     video_core.h
+ )
+ 
++if (EMSCRIPTEN AND ENABLE_OPENGL)
++    target_sources(video_core PRIVATE renderer_opengl/gl_webgl_readback.cpp
++                                      renderer_opengl/gl_webgl_readback.h)
++endif()
++
+ if (ENABLE_SOFTWARE_RENDERER)
+     target_sources(video_core PRIVATE
+         renderer_software/renderer_software.cpp
+diff --git a/src/video_core/host_shaders/CMakeLists.txt b/src/video_core/host_shaders/CMakeLists.txt
+index 9a514fe..de69858 100644
+--- a/src/video_core/host_shaders/CMakeLists.txt
++++ b/src/video_core/host_shaders/CMakeLists.txt
+@@ -14,6 +14,9 @@ set(SHADER_FILES
+     texture_filtering/x_gradient.frag
+     texture_filtering/y_gradient.frag
+     full_screen_triangle.vert
++    webgl_readback.vert
++    webgl_readback_depth.frag
++    webgl_readback_stencil.frag
+     opengl_present.frag
+     opengl_present.vert
+     opengl_present_anaglyph.frag
+diff --git a/src/video_core/renderer_opengl/gl_texture_runtime.cpp b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+index e193f56..fa12097 100644
+--- a/src/video_core/renderer_opengl/gl_texture_runtime.cpp
++++ b/src/video_core/renderer_opengl/gl_texture_runtime.cpp
+@@ -11,6 +11,9 @@
+ #include "video_core/renderer_opengl/gl_texture_mailbox.h"
+ #include "video_core/renderer_opengl/gl_texture_runtime.h"
+ #include "video_core/renderer_opengl/pica_to_gl.h"
++#ifdef __EMSCRIPTEN__
++#include "video_core/renderer_opengl/gl_webgl_readback.h"
++#endif
+ 
+ namespace OpenGL {
+ 
+@@ -501,7 +504,12 @@ void Surface::Download(const VideoCore::BufferTextureCopy& download,
+ 
+     const u32 unscaled_width = download.texture_rect.GetWidth();
+     const u32 unscaled_height = download.texture_rect.GetHeight();
+-    glPixelStorei(GL_UNPACK_ROW_LENGTH, unscaled_width);
++    // Readback uses PACK state. Changing UNPACK here leaks the downloaded width
++    // into unrelated uploads, including the display textures after a state load.
++    GLint previous_pack_row_length{};
++    glGetIntegerv(GL_PACK_ROW_LENGTH, &previous_pack_row_length);
++    glPixelStorei(GL_PACK_ROW_LENGTH, unscaled_width);
++    SCOPE_EXIT({ glPixelStorei(GL_PACK_ROW_LENGTH, previous_pack_row_length); });
+ 
+     // Scale down upscaled data before downloading it
+     if (res_scale != 1) {
+@@ -514,6 +522,19 @@ void Surface::Download(const VideoCore::BufferTextureCopy& download,
+         BlitScale(blit, false);
+     }
+ 
++#ifdef __EMSCRIPTEN__
++    if (pixel_format == PixelFormat::D24S8) {
++        if (!runtime->depth_stencil_readback) {
++            runtime->depth_stencil_readback = std::make_unique<WebGLDepthStencilReadback>();
++        }
++        const auto full_rect = GetRect(download.texture_level);
++        runtime->depth_stencil_readback->Download(Handle(0), download.texture_level,
++                                                 full_rect.GetWidth(), full_rect.GetHeight(),
++                                                 download.texture_rect, staging.mapped);
++        return;
++    }
++#endif
++
+     // Try to download without using an fbo. This should succeed on recent desktop drivers
+     if (DownloadWithoutFbo(download, staging)) {
+         return;
+@@ -530,8 +551,6 @@ void Surface::Download(const VideoCore::BufferTextureCopy& download,
+     const auto& tuple = runtime->GetFormatTuple(pixel_format);
+     glReadPixels(download.texture_rect.left, download.texture_rect.bottom, unscaled_width,
+                  unscaled_height, tuple.format, tuple.type, staging.mapped.data());
+-
+-    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
+ }
+ 
+ bool Surface::DownloadWithoutFbo(const VideoCore::BufferTextureCopy& download,
+@@ -541,11 +560,7 @@ bool Surface::DownloadWithoutFbo(const VideoCore::BufferTextureCopy& download,
+     }
+ 
+     const auto& tuple = runtime->GetFormatTuple(pixel_format);
+-    const u32 unscaled_width = download.texture_rect.GetWidth();
+-
+     glActiveTexture(TEMP_UNIT);
+-    glPixelStorei(GL_PACK_ROW_LENGTH, unscaled_width);
+-    SCOPE_EXIT({ glPixelStorei(GL_PACK_ROW_LENGTH, 0); });
+ 
+     // Prefer glGetTextureSubImage in most cases since it's the fastest and most convenient option
+     const bool is_full_download = download.texture_rect == GetRect();
+diff --git a/src/video_core/renderer_opengl/gl_texture_runtime.h b/src/video_core/renderer_opengl/gl_texture_runtime.h
+index 5fe7300..2924f6e 100644
+--- a/src/video_core/renderer_opengl/gl_texture_runtime.h
++++ b/src/video_core/renderer_opengl/gl_texture_runtime.h
+@@ -4,6 +4,7 @@
+ 
+ #pragma once
+ 
++#include <memory>
+ #include "video_core/rasterizer_cache/framebuffer_base.h"
+ #include "video_core/rasterizer_cache/rasterizer_cache_base.h"
+ #include "video_core/rasterizer_cache/surface_base.h"
+@@ -29,6 +30,9 @@ struct FormatTuple {
+ 
+ class Surface;
+ class Driver;
++#ifdef __EMSCRIPTEN__
++class WebGLDepthStencilReadback;
++#endif
+ 
+ /**
+  * Provides texture manipulation functions to the rasterizer cache
+@@ -93,6 +97,9 @@ private:
+     std::vector<u8> staging_buffer;
+     std::array<OGLFramebuffer, 3> draw_fbos;
+     std::array<OGLFramebuffer, 3> read_fbos;
++#ifdef __EMSCRIPTEN__
++    std::unique_ptr<WebGLDepthStencilReadback> depth_stencil_readback;
++#endif
+ };
+ 
+ class Surface : public VideoCore::SurfaceBase {
+diff --git a/src/video_core/host_shaders/webgl_readback.vert b/src/video_core/host_shaders/webgl_readback.vert
+new file mode 100644
+index 0000000..0bb721c
+--- /dev/null
++++ b/src/video_core/host_shaders/webgl_readback.vert
+@@ -0,0 +1,7 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++void main() {
++    vec2 position = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
++    gl_Position = vec4(position * 2.0 - 1.0, 0.0, 1.0);
++}
+diff --git a/src/video_core/host_shaders/webgl_readback_depth.frag b/src/video_core/host_shaders/webgl_readback_depth.frag
+new file mode 100644
+index 0000000..269b1aa
+--- /dev/null
++++ b/src/video_core/host_shaders/webgl_readback_depth.frag
+@@ -0,0 +1,18 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++uniform highp sampler2D source_depth;
++uniform int source_level;
++uniform float depth_scale;
++out vec4 result;
++
++void main() {
++    float depth = texelFetch(source_depth, ivec2(gl_FragCoord.xy), source_level).r;
++    // Some depth samplers land exactly half a unit below a 24-bit integer.
++    // GLSL round() may choose the even/lower value at ties. Add the correction
++    // as an integer so float + 0.5 cannot round large odd integers up again.
++    float scaled_depth = depth * depth_scale;
++    uint packed_depth = uint(scaled_depth) + uint(fract(scaled_depth) >= 0.5);
++    result = vec4(float(packed_depth & 255u), float((packed_depth >> 8u) & 255u),
++                  float((packed_depth >> 16u) & 255u), 0.0) / 255.0;
++}
+diff --git a/src/video_core/host_shaders/webgl_readback_stencil.frag b/src/video_core/host_shaders/webgl_readback_stencil.frag
+new file mode 100644
+index 0000000..c9f5479
+--- /dev/null
++++ b/src/video_core/host_shaders/webgl_readback_stencil.frag
+@@ -0,0 +1,9 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++uniform float stencil_value;
++out vec4 result;
++
++void main() {
++    result = vec4(0.0, 0.0, 0.0, stencil_value);
++}
+diff --git a/src/video_core/renderer_opengl/gl_webgl_readback.h b/src/video_core/renderer_opengl/gl_webgl_readback.h
+new file mode 100644
+index 0000000..bb7b705
+--- /dev/null
++++ b/src/video_core/renderer_opengl/gl_webgl_readback.h
+@@ -0,0 +1,34 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++#pragma once
++
++#include <span>
++#include <vector>
++#include "common/math_util.h"
++#include "video_core/renderer_opengl/gl_resource_manager.h"
++
++namespace OpenGL {
++
++// WebGL cannot read DEPTH_STENCIL with readPixels. This helper is used only
++// when downloading a D24S8 surface, never by the normal draw/vertex path.
++class WebGLDepthStencilReadback {
++public:
++    void Download(GLuint source, u32 level, u32 width, u32 height,
++                  Common::Rectangle<u32> rectangle, std::span<u8> output);
++
++private:
++    void InitializePrograms();
++
++    OGLProgram depth_program;
++    OGLProgram stencil_program;
++    OGLFramebuffer framebuffer;
++    OGLTexture color;
++    OGLVertexArray vao;
++    OGLSampler sampler;
++    u32 allocated_width{};
++    u32 allocated_height{};
++    std::vector<u8> pixels;
++};
++
++} // namespace OpenGL
+diff --git a/src/video_core/renderer_opengl/gl_webgl_readback.cpp b/src/video_core/renderer_opengl/gl_webgl_readback.cpp
+new file mode 100644
+index 0000000..ac96630
+--- /dev/null
++++ b/src/video_core/renderer_opengl/gl_webgl_readback.cpp
+@@ -0,0 +1,186 @@
++// Copyright 2026 Azahar Emulator Project
++// Licensed under GPLv2 or any later version.
++
++#include <stdexcept>
++#include "common/scope_exit.h"
++#include "video_core/host_shaders/webgl_readback_depth_frag.h"
++#include "video_core/host_shaders/webgl_readback_stencil_frag.h"
++#include "video_core/host_shaders/webgl_readback_vert.h"
++#include "video_core/renderer_opengl/gl_state.h"
++#include "video_core/renderer_opengl/gl_webgl_readback.h"
++
++namespace OpenGL {
++
++void WebGLDepthStencilReadback::InitializePrograms() {
++    if (depth_program.handle && stencil_program.handle) {
++        return;
++    }
++    depth_program.Create(HostShaders::WEBGL_READBACK_VERT, HostShaders::WEBGL_READBACK_DEPTH_FRAG);
++    stencil_program.Create(HostShaders::WEBGL_READBACK_VERT, HostShaders::WEBGL_READBACK_STENCIL_FRAG);
++    for (const GLuint program : {depth_program.handle, stencil_program.handle}) {
++        GLint linked{};
++        glGetProgramiv(program, GL_LINK_STATUS, &linked);
++        if (!linked) {
++            depth_program.Release();
++            stencil_program.Release();
++            throw std::runtime_error("Could not compile WebGL depth/stencil readback shaders");
++        }
++    }
++    framebuffer.Create();
++    vao.Create();
++    sampler.Create();
++    glSamplerParameteri(sampler.handle, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_NEAREST);
++    glSamplerParameteri(sampler.handle, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
++    glSamplerParameteri(sampler.handle, GL_TEXTURE_COMPARE_MODE, GL_NONE);
++}
++
++void WebGLDepthStencilReadback::Download(GLuint source, u32 level, u32 width, u32 height,
++                                       Common::Rectangle<u32> rectangle, std::span<u8> output) {
++    // Bound the scratch allocation independently of guest-controlled dimensions.
++    constexpr u64 max_pixels = 16 * 1024 * 1024;
++    const u64 pixel_count = u64{rectangle.GetWidth()} * rectangle.GetHeight();
++    if (!source || !width || !height || u64{width} * height > max_pixels ||
++        rectangle.left >= rectangle.right || rectangle.bottom >= rectangle.top ||
++        rectangle.right > width || rectangle.top > height || pixel_count * 4 > output.size()) {
++        throw std::runtime_error("Invalid WebGL depth/stencil readback dimensions");
++    }
++
++    const OpenGLState previous = OpenGLState::GetCurState();
++    GLint active_texture{}, pack_alignment{}, pack_row_length{}, pack_skip_pixels{}, pack_skip_rows{};
++    GLint pack_buffer{};
++    const bool dither = glIsEnabled(GL_DITHER);
++    const bool rasterizer_discard = glIsEnabled(GL_RASTERIZER_DISCARD);
++    glGetIntegerv(GL_ACTIVE_TEXTURE, &active_texture);
++    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
++    glGetIntegerv(GL_PACK_ROW_LENGTH, &pack_row_length);
++    glGetIntegerv(GL_PACK_SKIP_PIXELS, &pack_skip_pixels);
++    glGetIntegerv(GL_PACK_SKIP_ROWS, &pack_skip_rows);
++    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
++    SCOPE_EXIT({
++        if (framebuffer.handle) {
++            glBindFramebuffer(GL_DRAW_FRAMEBUFFER, framebuffer.handle);
++            glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D,
++                                   0, 0);
++        }
++        previous.Apply();
++        // Program creation temporarily uses glUseProgram outside OpenGLState.
++        // Restore it explicitly even if initialization failed before Apply().
++        glUseProgram(previous.draw.shader_program);
++        glBindFramebuffer(GL_READ_FRAMEBUFFER, previous.draw.read_framebuffer);
++        glBindFramebuffer(GL_DRAW_FRAMEBUFFER, previous.draw.draw_framebuffer);
++        glBindBuffer(GL_PIXEL_PACK_BUFFER, pack_buffer);
++        glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
++        glPixelStorei(GL_PACK_ROW_LENGTH, pack_row_length);
++        glPixelStorei(GL_PACK_SKIP_PIXELS, pack_skip_pixels);
++        glPixelStorei(GL_PACK_SKIP_ROWS, pack_skip_rows);
++        glActiveTexture(active_texture);
++        if (dither) {
++            glEnable(GL_DITHER);
++        }
++        if (rasterizer_discard) {
++            glEnable(GL_RASTERIZER_DISCARD);
++        }
++    });
++
++    InitializePrograms();
++    OpenGLState state = previous;
++    state.cull.enabled = false;
++    state.depth.test_enabled = false;
++    state.depth.write_mask = GL_FALSE;
++    state.stencil.test_enabled = false;
++    state.stencil.write_mask = 0;
++    state.stencil.action_stencil_fail = GL_KEEP;
++    state.stencil.action_depth_fail = GL_KEEP;
++    state.stencil.action_depth_pass = GL_KEEP;
++    state.blend.enabled = false;
++    state.color_mask = {GL_TRUE, GL_TRUE, GL_TRUE, GL_TRUE};
++    state.scissor.enabled = false;
++    state.viewport = {static_cast<GLint>(rectangle.left), static_cast<GLint>(rectangle.bottom),
++                      static_cast<GLsizei>(rectangle.GetWidth()),
++                      static_cast<GLsizei>(rectangle.GetHeight())};
++    state.draw.read_framebuffer = framebuffer.handle;
++    state.draw.draw_framebuffer = framebuffer.handle;
++    state.draw.vertex_array = vao.handle;
++    state.draw.shader_program = depth_program.handle;
++    state.texture_units[0].sampler = sampler.handle;
++    state.texture_units[0].target = GL_TEXTURE_2D;
++
++    if (allocated_width != width || allocated_height != height) {
++        color.Release();
++        color.Create();
++        state.texture_units[0].texture_2d = color.handle;
++        state.Apply();
++        glActiveTexture(GL_TEXTURE0);
++        glTexStorage2D(GL_TEXTURE_2D, 1, GL_RGBA8, width, height);
++        allocated_width = width;
++        allocated_height = height;
++    }
++    state.texture_units[0].texture_2d = source;
++    state.Apply();
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, color.handle, 0);
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, 0, 0);
++    const GLenum color_attachment = GL_COLOR_ATTACHMENT0;
++    glDrawBuffers(1, &color_attachment);
++    glReadBuffer(GL_COLOR_ATTACHMENT0);
++    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++        throw std::runtime_error("Incomplete WebGL depth readback framebuffer");
++    }
++    glDisable(GL_DITHER);
++    glDisable(GL_RASTERIZER_DISCARD);
++    glUniform1i(glGetUniformLocation(depth_program.handle, "source_depth"), 0);
++    glUniform1i(glGetUniformLocation(depth_program.handle, "source_level"), level);
++    glUniform1f(glGetUniformLocation(depth_program.handle, "depth_scale"), 16777215.f);
++    glDrawArrays(GL_TRIANGLES, 0, 3);
++
++    // Do not sample a texture while it is attached to the draw framebuffer.
++    // Stencil values are recovered using read-only bit tests instead, since
++    // WebGL has no stencil texture sampling or stencil readPixels operation.
++    state.texture_units[0].texture_2d = 0;
++    state.draw.shader_program = stencil_program.handle;
++    state.stencil.test_enabled = true;
++    state.stencil.test_func = GL_NOTEQUAL;
++    state.stencil.test_ref = 0;
++    state.blend.enabled = true;
++    state.blend.rgb_equation = GL_FUNC_ADD;
++    state.blend.a_equation = GL_FUNC_ADD;
++    state.blend.src_rgb_func = GL_ONE;
++    state.blend.dst_rgb_func = GL_ONE;
++    state.blend.src_a_func = GL_ONE;
++    state.blend.dst_a_func = GL_ONE;
++    state.color_mask = {GL_FALSE, GL_FALSE, GL_FALSE, GL_TRUE};
++    state.Apply();
++    glFramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_DEPTH_STENCIL_ATTACHMENT, GL_TEXTURE_2D, source,
++                           level);
++    if (glCheckFramebufferStatus(GL_DRAW_FRAMEBUFFER) != GL_FRAMEBUFFER_COMPLETE) {
++        throw std::runtime_error("Incomplete WebGL stencil readback framebuffer");
++    }
++    const GLint stencil_value = glGetUniformLocation(stencil_program.handle, "stencil_value");
++    for (u32 bit = 0; bit < 8; ++bit) {
++        state.stencil.test_mask = 1u << bit;
++        state.Apply();
++        glUniform1f(stencil_value, static_cast<float>(1u << bit) / 255.f);
++        glDrawArrays(GL_TRIANGLES, 0, 3);
++    }
++
++    pixels.resize(static_cast<std::size_t>(pixel_count) * 4);
++    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
++    glPixelStorei(GL_PACK_ALIGNMENT, 1);
++    glPixelStorei(GL_PACK_ROW_LENGTH, 0);
++    glPixelStorei(GL_PACK_SKIP_PIXELS, 0);
++    glPixelStorei(GL_PACK_SKIP_ROWS, 0);
++    glReadPixels(rectangle.left, rectangle.bottom, rectangle.GetWidth(), rectangle.GetHeight(),
++                 GL_RGBA, GL_UNSIGNED_BYTE, pixels.data());
++    if (glGetError() != GL_NO_ERROR) {
++        throw std::runtime_error("WebGL depth/stencil readback failed");
++    }
++    for (std::size_t offset = 0; offset < pixels.size(); offset += 4) {
++        // Match GL_UNSIGNED_INT_24_8 on little-endian wasm before EncodeTexture
++        // applies its existing rotation into the 3DS D24S8 byte layout.
++        output[offset] = pixels[offset + 3];
++        output[offset + 1] = pixels[offset];
++        output[offset + 2] = pixels[offset + 1];
++        output[offset + 3] = pixels[offset + 2];
++    }
++}
++
++} // namespace OpenGL

@@ -31,6 +31,8 @@
 !/tools/test-azahar-hotpaths.sh
 !/tools/test-azahar-shader-decoder.sh
 !/tools/test-azahar-shader-jumps.sh
+!/tools/test-azahar-savestates.mjs
+!/tools/test-azahar-readback-state.mjs
 !/tools/tests/
 /tools/tests/*
 !/tools/tests/azahar-hotpaths.cpp
@@ -39,4 +41,6 @@
 !/tools/tests/azahar-shader-jumps.js
 !/tools/tests/azahar-stream-buffer.cpp
 !/tools/tests/azahar-present-shaders.js
+!/tools/tests/azahar-webgl-depth-readback.js
 !/AZAHAR_PERFORMANCE.md
+!/AZAHAR_SAVESTATES.md

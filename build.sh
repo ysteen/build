@@ -36,6 +36,11 @@
 coreToBuild="dosbox_pure"
 listAllCores=false
 listCoreNames=false
+buildJobs="${BUILD_JOBS:-$(nproc)}"
+if ! [[ "$buildJobs" =~ ^[1-9][0-9]*$ ]]; then
+    echo "BUILD_JOBS must be a positive integer" >&2
+    exit 1
+fi
 
 # process arguments
 for i in "$@"
@@ -110,7 +115,7 @@ cmakeBuildThreads() {
         cd "$cmakeBuildDir"
         emcmake cmake .. "${cmakeArgsArray[@]}" || exit 1
     fi
-    emmake make -j$(nproc) || exit 1
+    emmake make -j"$buildJobs" || exit 1
 
     if [ -n "$archivesString" ]; then
         printf "create %s\n%s\nsave\nend\n" "$outputArchive" "$archivesString" > merge.mri
@@ -162,6 +167,14 @@ if [ "$listAllCores" = false ]; then
         git apply "$runtimePatch"
     elif ! git apply --reverse --check "$runtimePatch" 2>/dev/null; then
         echo "Unable to apply EmulatorJS runtime patch" >&2
+        exit 1
+    fi
+
+    stateRuntimePatch="$initialPath/patches/retroarch-web-savestates.patch"
+    if git apply --check "$stateRuntimePatch" 2>/dev/null; then
+        git apply "$stateRuntimePatch"
+    elif ! git apply --reverse --check "$stateRuntimePatch" 2>/dev/null; then
+        echo "Unable to apply web save-state runtime patch" >&2
         exit 1
     fi
 
@@ -218,6 +231,22 @@ compileProject() {
             git apply "$azaharPerformancePatch"
         elif ! git apply --reverse --check "$azaharPerformancePatch" 2>/dev/null; then
             echo "Unable to apply Azahar WebAssembly performance patch" >&2
+            exit 1
+        fi
+
+        azaharStatePatch="$initialPath/patches/azahar-web-savestates.patch"
+        if git apply --check "$azaharStatePatch" 2>/dev/null; then
+            git apply "$azaharStatePatch"
+        elif ! git apply --reverse --check "$azaharStatePatch" 2>/dev/null; then
+            echo "Unable to apply Azahar web save-state patch" >&2
+            exit 1
+        fi
+
+        azaharReadbackPatch="$initialPath/patches/azahar-webgl-readback.patch"
+        if git apply --check "$azaharReadbackPatch" 2>/dev/null; then
+            git apply "$azaharReadbackPatch"
+        elif ! git apply --reverse --check "$azaharReadbackPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL depth/stencil readback patch" >&2
             exit 1
         fi
     fi

@@ -1,0 +1,128 @@
+diff --git a/Makefile.emulatorjs b/Makefile.emulatorjs
+index 1672a21..2b354e5 100644
+--- a/Makefile.emulatorjs
++++ b/Makefile.emulatorjs
+@@ -131,6 +131,10 @@ EXPORTED_FUNCTIONS = _main,_malloc,_free,_load_state, \
+ 
+ EXPORTS := Browser,callMain,cwrap,getValue,HEAPU8,FS,PATH,ERRNO_CODES,AL,abort,ENV,stringToNewUTF8,UTF8ToString,Browser,EmscriptenSendCommand,EmscriptenReceiveCommandReply,EmulatorJSGetState,EmulatorJSGetMemoryData
+ 
++ifneq (,$(findstring azahar,$(TARGET)))
++   EXPORTED_FUNCTIONS += ,_load_state_sync
++endif
++
+ LIBS   := -s USE_ZLIB=1
+ CFLAGS := -s USE_ZLIB=1
+ 
+@@ -189,6 +193,11 @@ ifneq (,$(findstring same_cdi,$(TARGET)))
+    LDFLAGS += -s EXCEPTION_CATCHING_ALLOWED="['_ZN18m68000_base_device11execute_runEv','_ZThn328_N18m68000_base_device11execute_runEv','_ZN15running_machine17start_all_devicesEv','_ZN12cli_frontend7executeEiPPc','_ZN8chd_file11open_commonEb','_ZN8chd_file13read_metadataEjjRNSt3__212basic_stringIcNS0_11char_traitsIcEENS0_9allocatorIcEEEE','_ZN8chd_file13read_metadataEjjRNSt3__26vectorIhNS0_9allocatorIhEEEE','_ZNK19netlist_mame_device19base_validity_checkER16validity_checker']"
+ endif
+ 
++ifneq (,$(findstring azahar,$(TARGET)))
++   # Azahar catches malformed archive errors instead of aborting the wasm VM.
++   LDFLAGS += -fexceptions
++endif
++
+ ifeq ($(HAVE_OPENGLES), 1)
+    ifeq ($(HAVE_OPENGLES3), 1)
+       LDFLAGS += -s FULL_ES3=1 -s MIN_WEBGL_VERSION=2 -s MAX_WEBGL_VERSION=2
+diff --git a/tasks/task_save.c b/tasks/task_save.c
+index 807c51b..0a14302 100644
+--- a/tasks/task_save.c
++++ b/tasks/task_save.c
+@@ -1849,12 +1849,9 @@ char* save_state_info(void)
+       return state_data;
+    }
+ 
+-   serial_size = core_serialize_size();
+-   if (serial_size == 0) {
+-      strcpy(state_data, "Size is zero||0");
+-      return state_data;
+-   }
+-
++   /* content_get_serialized_data queries the size before serializing. For
++    * variable-size cores (Azahar), that query already builds the complete
++    * compressed snapshot. Do not repeat it and serialize every state twice. */
+    save_data = content_get_serialized_data(&serial_size);
+    if (!save_data) {
+       strcpy(state_data, "Error writing data||0");
+@@ -1873,4 +1870,80 @@ void refresh_save_files(void)
+     event_load_save_files(false);
+ }
+ 
++/* Preflight every RASTATE block before core_unserialize can mutate the core.
++ * The legacy parser otherwise reads block headers without bounds checks. */
++static bool ejs_validate_state_container(const unsigned char *data, size_t size)
++{
++   size_t offset = 8;
++   bool seen_core = false;
++   if (!data || size < 8)
++      return false;
++   if (memcmp(data, "RASTATE", 7) != 0)
++      return true; /* Raw core archives are validated by the core itself. */
++   if (data[7] != 1)
++      return false;
++   while (offset < size)
++   {
++      const unsigned char *marker;
++      size_t length, padded;
++      if (size - offset < 8)
++         return false;
++      marker = data + offset;
++      length = (uint32_t)marker[4] | ((uint32_t)marker[5] << 8) |
++               ((uint32_t)marker[6] << 16) | ((uint32_t)marker[7] << 24);
++      offset += 8;
++      if (length > size - offset || length > SIZE_MAX - 7)
++         return false;
++      padded = CONTENT_ALIGN_SIZE(length);
++      if (padded > size - offset)
++         return false;
++      if (memcmp(marker, RASTATE_END_BLOCK, 4) == 0)
++         return seen_core && length == 0 && offset == size;
++      if (memcmp(marker, RASTATE_MEM_BLOCK, 4) == 0)
++      {
++         if (seen_core || length == 0)
++            return false;
++         seen_core = true;
++      }
++      offset += padded;
++   }
++   return false;
++}
++
++/* Optional Azahar web API: cwrap("load_state_sync", "number", ["string"]).
++ * Returns 1 only after the core accepts the state, otherwise 0. This avoids
++ * the legacy load_state return value (which merely echoes its second arg)
++ * and its deferred task, so the frontend can display real load failures. */
++int load_state_sync(const char *path)
++{
++   const int64_t max_size = 512 * 1024 * 1024;
++   RFILE *file;
++   int64_t size;
++   unsigned char *data;
++   bool result = false;
++   if (!path || !core_info_current_supports_savestate())
++      return 0;
++#ifdef HAVE_CHEEVOS
++   if (rcheevos_hardcore_active())
++      return 0;
++#endif
++   file = filestream_open(path, RETRO_VFS_FILE_ACCESS_READ,
++                          RETRO_VFS_FILE_ACCESS_HINT_NONE);
++   if (!file)
++      return 0;
++   size = filestream_get_size(file);
++   if (size < 8 || size > max_size)
++   {
++      filestream_close(file);
++      return 0;
++   }
++   data = (unsigned char*)malloc((size_t)size);
++   if (data && filestream_read(file, data, size) == size &&
++       ejs_validate_state_container(data, (size_t)size))
++      result = content_deserialize_state(data, (size_t)size);
++   free(data);
++   filestream_close(file);
++   return result ? 1 : 0;
++}
++
+ #endif

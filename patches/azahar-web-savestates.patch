@@ -1,0 +1,273 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index a4b3860..8d80d72 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -34,6 +34,12 @@ endif()
+ 
+ option(ENABLE_LIBRETRO "Build as a LibRetro core" OFF)
+ 
++if (EMSCRIPTEN AND ENABLE_LIBRETRO)
++    # Save-state archives report malformed data through C++ exceptions. Preserve
++    # both catch handlers and RAII cleanup; link-time flags alone are not enough.
++    add_compile_options($<$<COMPILE_LANGUAGE:CXX>:-fexceptions>)
++endif()
++
+ # Some submodules like to pick their own default build type if not specified.
+ # Make sure we default to Release build type always, unless the generator has custom types.
+ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+diff --git a/src/core/savestate.cpp b/src/core/savestate.cpp
+index 573862d..9205348 100644
+--- a/src/core/savestate.cpp
++++ b/src/core/savestate.cpp
+@@ -218,6 +218,9 @@ void System::LoadState(u32 slot) {
+ }
+ 
+ std::vector<u8> System::SaveStateBuffer() const {
++    if (app_loader && !app_loader->SupportsSaveStates()) {
++        throw std::runtime_error("The current app loader doesn't support save states");
++    }
+     std::ostringstream sstream{std::ios_base::binary};
+     // Serialize
+     oarchive oa{sstream};
+@@ -227,6 +230,10 @@ std::vector<u8> System::SaveStateBuffer() const {
+     const auto data = std::span<const u8>{reinterpret_cast<const u8*>(str.data()), str.size()};
+     auto buffer = Common::Compression::CompressDataZSTDDefault(data);
+ 
++    if (buffer.empty()) {
++        throw std::runtime_error("Could not compress save state");
++    }
++
+     CSTHeader header{};
+     header.filetype = header_magic_bytes;
+     header.program_id = title_id;
+@@ -251,12 +258,12 @@ std::vector<u8> System::SaveStateBuffer() const {
+ bool System::LoadStateBuffer(std::vector<u8> buffer) {
+     CSTHeader header;
+ 
+-    if (buffer.size() < sizeof(header)) {
++    if (buffer.size() <= sizeof(header)) {
+         LOG_ERROR(Core, "Save state too small");
+         return false;
+     }
+ 
+-    header = *((CSTHeader*)buffer.data());
++    std::memcpy(&header, buffer.data(), sizeof(header));
+ 
+     if (header.filetype != header_magic_bytes) {
+         LOG_ERROR(Core, "Invalid save state");
+@@ -275,8 +282,19 @@ bool System::LoadStateBuffer(std::vector<u8> buffer) {
+         return false;
+     }
+ 
+-    std::vector<u8> state(buffer.begin() + sizeof(CSTHeader), buffer.end());
++    // Validate and decompress before deserialization can shut down the running
++    // system. A web state may contain at most 512 MiB of uncompressed data;
++    // normal 3DS FCRAM/VRAM snapshots fit well below that bound.
++    const auto state = std::span<const u8>{buffer}.subspan(sizeof(CSTHeader));
++#ifdef __EMSCRIPTEN__
++    auto decompressed = Common::Compression::DecompressDataZSTD(state, 512 * 1024 * 1024);
++#else
+     auto decompressed = Common::Compression::DecompressDataZSTD(state);
++#endif
++    if (decompressed.empty()) {
++        LOG_ERROR(Core, "Invalid or oversized compressed save state");
++        return false;
++    }
+ 
+     std::istringstream sstream{
+         std::string{reinterpret_cast<char*>(decompressed.data()), decompressed.size()},
+diff --git a/src/common/zstd_compression.h b/src/common/zstd_compression.h
+index 0d3372b..c8fe513 100644
+--- a/src/common/zstd_compression.h
++++ b/src/common/zstd_compression.h
+@@ -8,6 +8,7 @@
+ 
+ #pragma once
+ 
++#include <limits>
+ #include <span>
+ #include <unordered_map>
+ #include <vector>
+@@ -47,7 +48,7 @@ namespace Common::Compression {
+  *
+  * @return the size of the decompressed data.
+  */
+-[[nodiscard]] std::size_t GetDecompressedSize(std::span<const u8> compressed);
++[[nodiscard]] u64 GetDecompressedSize(std::span<const u8> compressed);
+ 
+ /**
+  * Decompresses a source memory region with Zstandard and returns the uncompressed data in a vector.
+@@ -56,7 +57,9 @@ namespace Common::Compression {
+  *
+  * @return the decompressed data.
+  */
+-[[nodiscard]] std::vector<u8> DecompressDataZSTD(std::span<const u8> compressed);
++[[nodiscard]] std::vector<u8> DecompressDataZSTD(
++    std::span<const u8> compressed,
++    std::size_t max_size = std::numeric_limits<std::size_t>::max());
+ 
+ } // namespace Common::Compression
+ 
+@@ -277,4 +280,4 @@ bool DeCompressZ3DSFile(const std::string& src_file, const std::string& dst_file
+ } // namespace FileUtil
+ 
+ BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSWriteIOFile)
+-BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSReadIOFile)
+\ No newline at end of file
++BOOST_CLASS_EXPORT_KEY(FileUtil::Z3DSReadIOFile)
+diff --git a/src/common/zstd_compression.cpp b/src/common/zstd_compression.cpp
+index 20840e3..df705b3 100644
+--- a/src/common/zstd_compression.cpp
++++ b/src/common/zstd_compression.cpp
+@@ -52,24 +52,32 @@ std::vector<u8> CompressDataZSTDDefault(std::span<const u8> source) {
+     return CompressDataZSTD(source, ZSTD_CLEVEL_DEFAULT);
+ }
+ 
+-std::size_t GetDecompressedSize(std::span<const u8> compressed) {
++u64 GetDecompressedSize(std::span<const u8> compressed) {
+     return ZSTD_getFrameContentSize(compressed.data(), compressed.size());
+ }
+ 
+-std::vector<u8> DecompressDataZSTD(std::span<const u8> compressed) {
+-    const std::size_t decompressed_size = GetDecompressedSize(compressed);
++std::vector<u8> DecompressDataZSTD(std::span<const u8> compressed, std::size_t max_size) {
++    // Zstandard sizes are 64-bit even on wasm32. Do not truncate before checking
++    // the caller's allocation limit (including the error/unknown sentinels).
++    const u64 decompressed_size = GetDecompressedSize(compressed);
+ 
+     if (decompressed_size == ZSTD_CONTENTSIZE_UNKNOWN) {
+         LOG_ERROR(Common, "ZSTD decompressed size could not be determined.");
+         return {};
+     }
+-    if (decompressed_size == ZSTD_CONTENTSIZE_ERROR || ZSTD_isError(decompressed_size)) {
++    if (decompressed_size == ZSTD_CONTENTSIZE_ERROR) {
+         LOG_ERROR(Common, "Error determining ZSTD decompressed size: {} ({})",
+                   ZSTD_getErrorName(decompressed_size), decompressed_size);
+         return {};
+     }
+ 
+-    std::vector<u8> decompressed(decompressed_size);
++    if (decompressed_size > max_size) {
++        LOG_ERROR(Common, "ZSTD decompressed size exceeds the allocation limit: {} > {}",
++                  decompressed_size, max_size);
++        return {};
++    }
++
++    std::vector<u8> decompressed(static_cast<std::size_t>(decompressed_size));
+     const std::size_t uncompressed_result_size = ZSTD_decompress(
+         decompressed.data(), decompressed.size(), compressed.data(), compressed.size());
+ 
+diff --git a/src/citra_libretro/citra_libretro.cpp b/src/citra_libretro/citra_libretro.cpp
+index aecff09..ed119f6 100644
+--- a/src/citra_libretro/citra_libretro.cpp
++++ b/src/citra_libretro/citra_libretro.cpp
+@@ -969,23 +969,26 @@ static bool DrainAsyncOperations(Core::System& system) {
+         return true;
+     }
+ 
++    const bool previous_suppression = emu_instance->emu_window->suppressPresentation;
+     emu_instance->emu_window->suppressPresentation = true;
++    struct RestorePresentation {
++        bool& suppressed;
++        bool previous;
++        ~RestorePresentation() { suppressed = previous; }
++    } restore{emu_instance->emu_window->suppressPresentation, previous_suppression};
+     auto start = std::chrono::steady_clock::now();
+ 
+     while (system.Kernel().AreAsyncOperationsPending()) {
+         if (std::chrono::steady_clock::now() - start > std::chrono::seconds(5)) {
+             LOG_ERROR(Frontend, "Timed out waiting for async operations to complete");
+-            emu_instance->emu_window->suppressPresentation = false;
+             return false;
+         }
+         auto result = system.RunLoop();
+         if (result != Core::System::ResultStatus::Success) {
+-            emu_instance->emu_window->suppressPresentation = false;
+             return false;
+         }
+     }
+ 
+-    emu_instance->emu_window->suppressPresentation = false;
+     return true;
+ }
+ 
+@@ -993,15 +996,14 @@ std::optional<std::vector<u8>> savestate = {};
+ 
+ size_t retro_serialize_size() {
+     auto& system = Core::System::GetInstance();
++    savestate.reset();
+     if (!system.IsPoweredOn())
+         return 0;
+ 
+-    if (!DrainAsyncOperations(system)) {
+-        savestate.reset();
+-        return 0;
+-    }
+-
+     try {
++        if (!DrainAsyncOperations(system)) {
++            return 0;
++        }
+         savestate = system.SaveStateBuffer();
+         return savestate->size();
+     } catch (const std::exception& e) {
+@@ -1012,7 +1014,7 @@ size_t retro_serialize_size() {
+ }
+ 
+ bool retro_serialize(void* data, size_t size) {
+-    if (!savestate.has_value())
++    if (!data || !savestate.has_value())
+         return false;
+     if (size < savestate->size())
+         return false;
+@@ -1023,15 +1025,15 @@ bool retro_serialize(void* data, size_t size) {
+ 
+ bool retro_unserialize(const void* data, size_t size) {
+     auto& system = Core::System::GetInstance();
+-    if (!system.IsPoweredOn())
+-        return false;
+-
+-    if (!DrainAsyncOperations(system)) {
++    savestate.reset();
++    if (!data || size == 0 || !system.IsPoweredOn())
+         return false;
+-    }
+ 
+-    std::vector<u8> buffer(static_cast<const u8*>(data), static_cast<const u8*>(data) + size);
+     try {
++        if (!DrainAsyncOperations(system)) {
++            return false;
++        }
++        std::vector<u8> buffer(static_cast<const u8*>(data), static_cast<const u8*>(data) + size);
+         return system.LoadStateBuffer(std::move(buffer));
+     } catch (const std::exception& e) {
+         LOG_ERROR(Frontend, "Error loading state: {}", e.what());
+diff --git a/src/core/core.cpp b/src/core/core.cpp
+index 2cb4e9d..dac8180 100644
+--- a/src/core/core.cpp
++++ b/src/core/core.cpp
+@@ -10,6 +10,7 @@
+ #include "audio_core/lle/lle.h"
+ #include "common/arch.h"
+ #include "common/logging/log.h"
++#include "common/scope_exit.h"
+ #include "common/settings.h"
+ #include "core/arm/arm_interface.h"
+ #include "core/arm/exclusive_monitor.h"
+@@ -835,6 +836,7 @@ bool System::IsInitialSetup() {
+ 
+ template <class Archive>
+ void System::serialize(Archive& ar, const unsigned int file_version) {
++    SCOPE_EXIT({ save_state_status = SaveStateStatus::NONE; });
+ 
+     if (Archive::is_loading::value) {
+         save_state_status = SaveStateStatus::LOADING;
+@@ -928,8 +930,6 @@ void System::serialize(Archive& ar, const unsigned int file_version) {
+         u32 cheats_pid = cheat_engine.GetConnectedPID();
+         ar & cheats_pid;
+     }
+-
+-    save_state_status = SaveStateStatus::NONE;
+ }
+ 
+ SERIALIZE_IMPL(System)
