@@ -226,6 +226,19 @@ compileProject() {
     fi
 
     if [ "$name" = "azahar" ]; then
+        azaharSubmissionPatch="$initialPath/patches/azahar-webgl-submission.patch"
+        if git apply --reverse --check "$azaharSubmissionPatch" 2>/dev/null; then
+            git apply --reverse "$azaharSubmissionPatch"
+        fi
+        azaharAsyncPatch="$initialPath/patches/azahar-webgl-async.patch"
+        if git apply --reverse --check "$azaharAsyncPatch" 2>/dev/null; then
+            git apply --reverse "$azaharAsyncPatch"
+        fi
+        azaharCachePatch="$initialPath/patches/azahar-webgl-cache.patch"
+        # Validate the underlying patches without overlapping cache hunks on incremental builds.
+        if git apply --reverse --check "$azaharCachePatch" 2>/dev/null; then
+            git apply --reverse "$azaharCachePatch"
+        fi
         azaharPerformancePatch="$initialPath/patches/azahar-wasm-performance.patch"
         if git apply --check "$azaharPerformancePatch" 2>/dev/null; then
             git apply "$azaharPerformancePatch"
@@ -247,6 +260,25 @@ compileProject() {
             git apply "$azaharReadbackPatch"
         elif ! git apply --reverse --check "$azaharReadbackPatch" 2>/dev/null; then
             echo "Unable to apply Azahar WebGL depth/stencil readback patch" >&2
+            exit 1
+        fi
+
+        if git apply --check "$azaharCachePatch" 2>/dev/null; then
+            git apply "$azaharCachePatch"
+        elif ! git apply --reverse --check "$azaharCachePatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL shader cache patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharAsyncPatch" 2>/dev/null; then
+            git apply "$azaharAsyncPatch"
+        elif ! git apply --reverse --check "$azaharAsyncPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL asynchronous fragment patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharSubmissionPatch" 2>/dev/null; then
+            git apply "$azaharSubmissionPatch"
+        elif ! git apply --reverse --check "$azaharSubmissionPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL submission patch" >&2
             exit 1
         fi
     fi

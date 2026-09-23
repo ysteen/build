@@ -1,8 +1,288 @@
 # Azahar WebAssembly performance investigation
 
-Updated: 2026-09-21 (Asia/Seoul).
+Updated: 2026-09-23 (Asia/Seoul).
 
-## Scope and current build
+## Reused uploads and direct WebGL calls
+
+`patches/azahar-webgl-submission.patch` adds byte-verified stream-buffer reuse for
+hardware vertices, indices and three separately buffered uniform bindings. Cache
+entries are invalidated on ring wrap or growth. Known WebGL calls in stream,
+rasterizer and state code can call Emscripten directly, avoiding proc-address and
+indirect dispatch wrappers. Asyncify, required exception handling and the ARM
+interpreter remain unchanged. Ready specialized programs also bypass generic
+configuration/preparation in the steady draw path.
+
+The user's RomM state 29 was loaded normally after boot. In one visible Chrome
+session, modes 0,3,0,1,2,3 each received ten seconds of warmup and fifteen fresh
+samples, with no profiler, GL timing hooks or concurrent builds. Pooled medians:
+
+| Mode | Core FPS | Core execution | Graphics-command CPU time |
+| --- | ---: | ---: | ---: |
+| Ordinary uploads / GLAD | 19.61 | 46.89 ms | 30.91 ms |
+| Upload reuse | 20.85 | 44.35 ms | 27.82 ms |
+| Direct calls | 20.00 | 45.92 ms | 29.81 ms |
+| Both (default) | 21.63 | 42.64 ms | 25.88 ms |
+
+Both features improved the measured core rate by 10.3%; the game itself remained
+at 10.81 FPS and 36.1% speed. Ready-program generic bypass is common to all four
+modes, so this does not separately measure that change. Reuse hit rates were
+94.1% for vertex lookups, 97.7% for indices and 25.0% for uniforms, by count rather
+than bytes. Seventeen async programs completed after restore, zero failed, and
+152 generic draws occurred. No further generic draws, pending programs or captured
+errors occurred during the steady comparison. First-use vertex/link waits remain.
+
+Some captures show a black lower screen on both old and candidate cores; other
+captures of the same modes show both screens, including the final default-mode
+capture. This observation is not resolved or attributed to the optimization.
+Cross-image results (cache-only 19.76 FPS, async R2 17.66 FPS) also have different
+preload/cache and capture conditions and are reference measurements only.
+
+Validation: native ASan/UBSan and Wasm stream tests; 2,048 real WebGL2 output checks
+across all four modes, including reuse and orphaning; full core build, JS syntax,
+Wasm validation, archive extraction, reverse-patch check, RomM Azahar runtime test
+and served hash verification. `tools/test-azahar-webgl-submission.sh` creates the
+isolated GPU fixture; `tools/test-azahar-hotpaths.sh` covers CPU/Wasm stream checks.
+The incremental build now reverses submission, async, then cache layers before
+validating underlying patches and reapplies them in dependency order.
+
+Current image: `romm-custom-dosbox-pure:5.2.0-azahar-submit-20260923-r1`.
+Served core: 3,503,007 bytes, SHA-256
+`85d9558738c08ebf6f385875a78f91a1b0d4cf03d5a7d8939b9844f85b89e8b2`.
+See [the Korean result](docs/AZAHAR_WEBGL_SUBMISSION.ko.md) and
+[measurements](docs/azahar-webgl-submission-2026-09-23.json).
+
+## Generic WebGL fragment fallback and asynchronous specialization
+
+`patches/azahar-webgl-async.patch` adds a fragment-only fallback after the variant
+and source-cache patch. A 144-byte uniform block describes supported PICA TEV,
+texture, fog and framebuffer settings. The existing 1328-byte fragment block is
+shared with the specialized generator. Unsupported effects retain synchronous
+specialization. Native builds keep the existing renderer.
+
+On `KHR_parallel_shader_compile`, at most four specialized programs are pending.
+Compilation/linking does not immediately query status, logs or uniforms. Polling
+checks completion at most every 8 ms; only completed programs are finalized and
+persisted. Generic drawing continues while queued specializations are unfinished.
+Novel vertex shaders and the generic program for each vertex shader are still
+synchronous, so this implementation does not remove all first-use stalls.
+
+The build reverses the async layer before the cache layer when checking an
+incremental tree, then reapplies them in that order after the underlying patches.
+`tools/test-azahar-webgl-generic.sh` checks the real GL utility with ASan/UBSan,
+the generated fallback in Wasm and the 24-field telemetry ABI. Chrome passed
+420 pixel comparisons across 108 fixtures, 24 depth checks and eight unsupported
+configuration rejections. The prior 696 cache/variant GPU checks also passed.
+The first experimental telemetry glue exceeded Emscripten's direct argument
+handling; the deployed R2 build passes one pointer and reads the 24 doubles.
+
+Game startup with the source cache disabled completed 16 async programs with no
+failures and 31 generic draws, returning to approximately 60 core FPS. However,
+vertex status waits still reached 9.69 seconds, generic links 1.53 seconds and a
+startup frame 33.1 seconds. These runs are not a controlled before/after comparison.
+A subsequent normal RomM Load Latest State succeeded after boot. An earlier
+automatic startup restore timed out in DrainAsyncOperations after five seconds;
+that timing issue remains unresolved. No memory capture/restore diagnostic was run.
+
+In the user's crowded-plaza scene, 42 fresh visible samples from a one-minute
+capture had median 31.90 core FPS, 15.95 game FPS, 53.3% emulation speed, 29.17 ms
+core execution and 17.13 ms GPU-command processing. There were no new shader/link
+calls, no pending programs and no added generic draws. No observed GL call exceeded
+20 ms; bufferSubData peaked at 0.40 ms. GPU-command time includes CPU processing,
+not just device execution. A separate CPU sample placed 20.4% self time in the ARM
+interpreter and 2.6% inclusive time in UseFragmentShader. Wasm/JS dispatch is also
+substantial. Profiling FPS is excluded from the performance result. Function names
+were recovered by matching unique normalized function bodies to a separate relink,
+since symbol emission changed function order. The original scene is preserved.
+After all GL hooks and the CPU profiler were removed, ten fresh samples in the
+same scene still had median 32.06 core FPS, 53.6% speed and 28.91 ms core execution,
+with unchanged program and generic-draw counts.
+
+Historical R2 image: `romm-custom-dosbox-pure:5.2.0-azahar-async-20260923-r2`.
+Served core: 3,508,233 bytes, SHA-256
+`90c3ba8a2fc87c931187224130e8f456e2986e225c433a1f01f5a775229146a4`.
+See [the Korean result](../result/AZAHAR_ASYNC_SHADER.ko.md) and
+[measurement data](../result/azahar-webgl-async-2026-09-23.json).
+
+## WebGL variants and persistent source/program cache on September 23
+
+`patches/azahar-webgl-cache.patch` implements the requested first two steps:
+reduce shader variants and persist observed GLSL vertex/fragment pairs for startup
+compilation/linking. The measurements in this section predate the async layer above.
+
+On WebGL, alpha comparison and scissor mode now use two uniform integers in the
+existing std140 padding at offsets 72 and 76. The fragment block remains 1328
+bytes; all later offsets are unchanged. Unused TEV operands are masked out of
+configuration identity and omitted from generated code. Native GLSL is unchanged.
+
+The source cache shares the core's existing IDBFS mount and lives in
+`/data/saves/Azahar/Azahar/shaders/webgl-v1/`. It stores exact generated sources
+and observed VS/FS index pairs, not driver binaries. Loading validates format,
+shader-cache version, accurate-multiply mode, checksum, lengths and indices.
+Limits per title/multiply mode are 8 MiB, 512 shaders, 256 programs and 512 KiB
+per source. Successful stages and linked programs seed the existing in-memory
+caches; bad cache files fall back to normal compilation. New pairs are written
+through a temporary file and renamed, with the existing IDBFS auto-persist hooks
+handling persistence. RomM's `sdmc` save bundle excludes these shader files.
+
+The build applies this patch after the existing performance, state and readback
+patches. Incremental builds first reverse this patch on a matching source tree
+before validating the underlying patches, then apply it again.
+
+Validation passed native ASan/UBSan and Wasm cache tests, 696 Chrome WebGL2 output
+checks, native output equivalence for 480 configurations, full core compilation,
+archive/Wasm/JS checks and deployed artifact hashing. The synthetic configuration
+matrix produced 358 unique old sources and 10 new sources. Of the GPU checks,
+87 Never cases use the specified untouched framebuffer as their reference because
+the old unconditional-discard shader is rejected at draw time by this ANGLE device.
+
+A repeat launch loaded 53 observed pairs (318.5 ms at initial startup and 251.5 ms
+when state loading reconstructed the renderer), with zero new fragment compiles
+and zero new program links in the observed gameplay. A separate 21–22 second
+startup/state-restore long task remained; its exact blocking call is unresolved.
+Browser/driver caches also contribute, so this is not an isolated timing comparison
+of the source-cache patch alone.
+
+In the user's subsequent marked transition, 27 unseen fragment shaders/programs
+were needed. A 41.901-second long task included 21.849 seconds in shader-status
+queries and 19.933 seconds in program-status queries. Uploads were at most 1.66 ms
+per call and draws at most 0.05 ms. The cache grew from 53 to 80 pairs (710,893
+bytes). First-use stalls therefore remain; reuse is working. The user also reported
+that reused scenes transition quickly. The requested 60-second observation ended
+after 66.015 seconds because its stop timer waited behind the blocking task.
+
+A separate memory-state diagnostic failed in its temporary observer cleanup and
+the user reported a browser failure. No new Chrome crash dump was found; neither
+the state round trip nor the crash cause was established. That diagnostic was
+disabled. The final user-requested timing capture did not capture or restore states.
+
+Reproduce the bounded source/cache tests with
+`bash tools/test-azahar-webgl-cache.sh`. It creates before/after fixtures from the
+actual generator, checks native equivalence, and writes `verify-fragments.js` for
+evaluation in an idle WebGL2 test page. The temporary baseline is made by reversing
+only this patch on copies; it never edits the working core.
+
+See [the Korean usage and results](../result/AZAHAR_SHADER_CACHE.ko.md),
+[deployment and measurement data](../result/azahar-webgl-cache-2026-09-23.json), and
+[the marked transition capture](../result/azahar-transition-capture-2026-09-23.json).
+
+## Map-transition stalls observed on September 22
+
+During a user-triggered map transition in ROM 17, timing the existing WebGL calls
+recorded 18 calls exceeding 50 ms. The expensive calls were shader compile-status
+and program link-status queries: `getShaderParameter` took 1.55-2.59 seconds and
+`getProgramParameter` took 1.59-5.44 seconds. Together these queries blocked for
+42.93 seconds across successive frames, including one 26.845-second core frame.
+Program-cache entries increased from 25 to 36 during that interval. Buffer
+uploads and draws were below 3.3 ms per call in the same capture. This directly
+locates the long pause in synchronous shader preparation for the new scene.
+
+A background native build was running during the detailed timing capture and
+was paused to remove that CPU load. These times are diagnostic evidence, not a
+clean performance benchmark. Before that build started, the user's same session
+already contained an 11.127-second long task. After shader preparation, execution
+resumed at about 50.5 core FPS in a sampled window. This does not establish a
+stable frame rate for the new map.
+
+The separate Save & Quit failure was a pending `GL_INVALID_VALUE` from the shader
+cache's zero-length program-binary-format query, later observed by GPU state
+readback. See `AZAHAR_SAVESTATES.md` for the reproducer and fix. That correction
+does not make shader compilation asynchronous or eliminate map-transition stalls.
+Avoid repeatedly restarting during shader preparation: restarting discards the
+current in-memory shader/program cache. The WebGL hardware-draw option remains
+experimental; disabling it uses the slower CPU vertex path measured below.
+
+The read-only timing capture is recorded in
+`../result/azahar-stall-save-diagnosis-2026-09-22.json`.
+
+## WebGL shader compilation improvement on September 22
+
+The WebGL PICA shader generator now emits explicit transitions between jump
+dispatcher cases. Previously, normal execution fell through to the next case.
+ANGLE's [switch fall-through removal pass](https://chromium.googlesource.com/angle/angle/+/9d737966acdf628a7cb4e12e4781179ea3be5d7b/src/compiler/translator/tree_ops/RemoveSwitchFallThrough.cpp)
+copies the remaining case bodies for each fall-through chain. Long dispatchers
+therefore produce much more translated code and expensive driver compilation.
+Explicit transitions avoid that duplication. The last block returns from the
+subroutine, including when it contains only a NOP. Native GLSL is unchanged.
+
+A paired synthetic test used the actual generated GLSL for 16 chained conditional
+jumps, with distinct source identifiers to avoid identical-source cache hits.
+It ran on the same Chrome/ANGLE device without a concurrent native build.
+
+| Measurement | Before | After |
+| --- | ---: | ---: |
+| Vertex compile and program link | 1,537.7 ms | 79.9 ms |
+| First 32 draws, including format specialization and readback | 1,665.2 ms | 188.5 ms |
+| Warm 100,000-vertex draw and readback, no branches taken, median of 3 | 0.5 ms | 0.5 ms |
+| Warm 100,000-vertex draw and readback, all branches taken, median of 3 | 0.6 ms | 0.6 ms |
+| ANGLE non-empty fall-through warnings | 16 | 0 |
+
+The compile/link reduction is approximately 94.8% for this synthetic shader. It
+is not a measured map-transition improvement. Browser/driver caches were not
+cleared, and the warm timings include synchronization rather than isolated GPU
+timer queries. A larger 48-block baseline failed to finish linking successfully
+and is excluded from speedup calculations. The modified 48-block fixture passed.
+
+Validation uses the real PICA interpreter as the reference: native ASan/UBSan
+and Wasm outputs match, and WebGL transform feedback passes all 256 cases
+(eight programs, 16 uniform masks, float and packed-short attributes). Coverage
+includes forward/backward jumps, calls, IF/LOOP entries, inverted conditions,
+an empty final block, and the long chain. Native generated sources are identical
+before and after. `tools/test-azahar-shader-jumps.sh` accepts `STRESS_BLOCKS`
+(default 48) and `DECOMPILER_SOURCE` for bounded baseline comparisons.
+`tools/tests/azahar-shader-jumps.js` optionally measures completed bulk draws with
+`{warmVertices: 100000}`; every timed draw synchronizes through readback.
+
+The optimization preserves hardware drawing and shader arithmetic. First-use
+compilation is still synchronous, and other shaders or driver work can still
+pause a new scene. The live follow-up below confirms substantial stalls remain;
+the synthetic speedup must not be presented as a measured whole-game improvement.
+Raw measurements and artifact validation are recorded in
+`../result/azahar-shader-optimization-2026-09-22.json` and
+`../result/azahar-shader-build-2026-09-22.json`.
+
+## Live follow-up and diagnostic renderer crash
+
+The user refreshed and reported unchanged loading. Resource timing recorded a
+fresh 3,498,798-byte core download, matching the deployed artifact. A subsequent
+capture of the shaders actually generated by the game contains the new explicit
+jump transitions. The optimization is therefore active in gameplay. Nevertheless,
+the first observed session still recorded a 37.102-second long task.
+
+At 14:53:32 UTC on September 22, Chrome 153.0.8010.53's renderer crashed with
+`0xc0000005` at `chrome.dll+0x70ab317`. The crash followed immediately after a
+diagnostic `Runtime.queryObjects` request for `WebGLShader.prototype`. The request
+timed out and returned no shader list. That heap enumeration is the leading
+suspected trigger, not a proven application fault. The stack has not been
+symbolized, so correlation does not establish the exact Chrome defect. Do not
+repeat heap enumeration on this game renderer. The temporary collector was
+disabled. Crash-dump contents stay local; only selected metadata is retained in
+the report.
+
+After the user authorized further non-production testing, the tab was recovered
+and the existing game was launched again. A bounded observer recorded newly
+created shader sources and ordinary compile/link calls without enumerating the
+heap. It captured 41 shaders and 36 programs and restored its hooks afterward.
+Shader-status queries accumulated 30.149 seconds, and program-status queries
+7.154 seconds. The longest single queries were 3.362 and 1.167 seconds,
+respectively. A 31.778-second long task and a later 5.777-second task remained.
+These synchronous queries also wait for queued GPU work; their durations do not
+isolate compilation of the named shader alone. The first four recorded draws
+per program returned quickly, which does not exclude later driver specialization.
+
+After preparation, gameplay resumed around 59-60 core FPS in sampled windows,
+and a screenshot showed the battle scene rendering. No additional crash dump
+appeared in this verification period. This limited run does not establish that
+the core or browser is free of defects. A separate actual-shader compile/link
+probe measured 1.113 seconds with immediate stage checks and 0.968 seconds with
+checks deferred until linking. One sample per mode is insufficient to justify a
+whole-game speedup claim or another deployment.
+
+The test image remains `romm-custom-dosbox-pure:5.2.0-azahar-shader-20260922`.
+This follow-up changes diagnostics and documentation, not the deployed core.
+See `../result/azahar-shader-followup-2026-09-22.json` and
+`../result/azahar-real-shader-trace-2026-09-23.json` for the evidence.
+
+## Scope and September 21 baseline
 
 Testing uses only `romm-test` at `http://127.0.0.1:8081`, with Mario & Luigi:
 Dream Team (ROM 17), Chrome 153, ANGLE D3D11 and Radeon 680M. Native resolution,
@@ -18,7 +298,7 @@ RetroArch changes. Those were preserved. The performance patch includes that
 pre-existing work so the build remains reproducible; not all patch lines are new
 optimizations from this investigation.
 
-Current browser-verified core: `output/azahar-thread-wasm.data`.
+Previously browser-verified performance core: `output/azahar-thread-wasm.data`.
 
 - Build start: `2026-09-20T17:42:07+00:00`.
 - SHA-256: `c7bf4b725b7e987aeb076a00d6e2d9f7e4e716a7422b81a37f9c6cb59c989c9b`.

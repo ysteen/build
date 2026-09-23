@@ -1,0 +1,691 @@
+diff --git a/src/video_core/rasterizer_accelerated.cpp b/src/video_core/rasterizer_accelerated.cpp
+--- a/src/video_core/rasterizer_accelerated.cpp
++++ b/src/video_core/rasterizer_accelerated.cpp
+@@ -164,6 +164,11 @@
+     // Sync alpha testing and blending uniforms
+     if (dirty.CheckBlend()) {
+         fs_data.alphatest_ref = regs.framebuffer.output_merger.alpha_test.ref;
++#if defined(__EMSCRIPTEN__)
++        const auto& alpha_test = regs.framebuffer.output_merger.alpha_test;
++        fs_data.alphatest_func = static_cast<int>(alpha_test.enable
++            ? alpha_test.func.Value() : Pica::FramebufferRegs::CompareFunc::Always);
++#endif
+         fs_data.blend_color = ColorRGBA8(regs.framebuffer.output_merger.blend_const.raw);
+         fs_data_dirty = true;
+     }
+diff --git a/src/video_core/renderer_opengl/gl_rasterizer.cpp b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -810,6 +810,13 @@
+ 
+     // Update scissor uniforms
+     const auto [scissor_x1, scissor_y2, scissor_x2, scissor_y1] = fb_helper.Scissor();
++#if defined(__EMSCRIPTEN__)
++    const auto scissor_mode = static_cast<int>(regs.rasterizer.scissor_test.mode.Value());
++    if (fs_data.scissor_mode != scissor_mode) {
++        fs_data.scissor_mode = scissor_mode;
++        fs_data_dirty = true;
++    }
++#endif
+     if (fs_data.scissor_x1 != scissor_x1 || fs_data.scissor_x2 != scissor_x2 ||
+         fs_data.scissor_y1 != scissor_y1 || fs_data.scissor_y2 != scissor_y2) {
+ 
+diff --git a/src/video_core/renderer_opengl/gl_shader_manager.cpp b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -11,6 +11,9 @@
+ #include <variant>
+ #if defined(__EMSCRIPTEN__)
+ #include <emscripten.h>
++#include "common/file_util.h"
++#include "common/scm_rev.h"
++#include "video_core/renderer_opengl/gl_webgl_cache.h"
+ #endif
+ #include "common/hash.h"
+ #include "common/settings.h"
+@@ -121,6 +124,9 @@
+     }
+ 
+     void Create(const char* source, GLenum type) {
++#if defined(__EMSCRIPTEN__)
++        source_code = source;
++#endif
+         if (shader_or_program.index() == 0) {
+             std::get<OGLShader>(shader_or_program).Create(source, type);
+         } else {
+@@ -143,8 +149,15 @@
+         shader_or_program = std::move(program);
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    std::string_view Source() const { return source_code; }
++#endif
++
+ private:
+     std::variant<OGLShader, OGLProgram> shader_or_program;
++#if defined(__EMSCRIPTEN__)
++    std::string source_code;
++#endif
+ };
+ 
+ class TrivialVertexShader {
+@@ -157,6 +170,9 @@
+     GLuint Get() const {
+         return program.GetHandle();
+     }
++#if defined(__EMSCRIPTEN__)
++    std::string_view Source() const { return program.Source(); }
++#endif
+ 
+ private:
+     OGLShaderStage program;
+@@ -255,6 +271,31 @@
+         shader_map.insert_or_assign(key.Hash(), &cached_shader);
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    GLuint Preload(const std::string& source) {
++        const u64 hash = Common::ComputeHash64(source.data(), source.size());
++        if (const auto it = shader_cache.find(hash); it != shader_cache.end()) {
++            return it->second.GetHandle();
++        }
++        OGLShaderStage stage{false};
++        stage.Create(source.c_str(), ShaderType);
++        if (!stage.GetHandle()) return 0;
++        GLint valid = GL_FALSE;
++        glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
++        if (!valid) return 0;
++        const auto handle = stage.GetHandle();
++        shader_cache.emplace(hash, std::move(stage));
++        return handle;
++    }
++
++    std::string_view FindSource(GLuint handle) const {
++        for (const auto& [hash, stage] : shader_cache) {
++            if (stage.GetHandle() == handle) return stage.Source();
++        }
++        return {};
++    }
++#endif
++
+ private:
+     bool separable;
+     std::unordered_map<u64, OGLShaderStage*> shader_map;
+@@ -331,6 +372,31 @@
+         return source_hits;
+     }
+ 
++#if defined(__EMSCRIPTEN__)
++    GLuint Preload(const std::string& source) {
++        const u64 hash = Common::ComputeHash64(source.data(), source.size());
++        if (const auto it = shader_cache.find(hash); it != shader_cache.end()) {
++            return it->second.GetHandle();
++        }
++        OGLShaderStage stage{false};
++        stage.Create(source.c_str(), GL_FRAGMENT_SHADER);
++        if (!stage.GetHandle()) return 0;
++        GLint valid = GL_FALSE;
++        glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
++        if (!valid) return 0;
++        const auto handle = stage.GetHandle();
++        shader_cache.emplace(hash, std::move(stage));
++        return handle;
++    }
++
++    std::string_view FindSource(GLuint handle) const {
++        for (const auto& [hash, stage] : shader_cache) {
++            if (stage.GetHandle() == handle) return stage.Source();
++        }
++        return {};
++    }
++#endif
++
+ private:
+     static u64 GetEffectiveConfigHash(const FSConfig& config, u32 user_config,
+                                       const Pica::Shader::Profile& profile) {
+@@ -341,6 +407,11 @@
+         // calculated they do not affect generated GLSL and must not create cache variants.
+         effective_config.framebuffer.requested_logic_op = {};
+         effective_config.texture.requested_wrap = {};
++#if defined(__EMSCRIPTEN__)
++        // These tests use uniforms, so their modes share one compiled shader.
++        effective_config.framebuffer.alpha_test_func.Assign(Pica::FramebufferRegs::CompareFunc::Always);
++        effective_config.framebuffer.scissor_test_mode.Assign(Pica::RasterizerRegs::ScissorMode::Disabled);
++#endif
+         return Common::HashCombine(effective_config.Hash(), static_cast<u64>(user_config));
+     }
+ 
+@@ -431,6 +502,89 @@
+     u64 program_lookups{};
+     u64 program_misses{};
+ 
++#if defined(__EMSCRIPTEN__)
++    WebGLCacheData webgl_disk_data;
++    std::string webgl_cache_path;
++    u64 webgl_cache_key{};
++    u64 preloaded_shaders{};
++    u64 preloaded_programs{};
++    u64 persist_writes{};
++    double preload_ms{};
++
++    static u64 ProgramKey(GLuint vs, GLuint fs) {
++        return Common::HashCombine(u64{}, static_cast<u64>(vs), u64{}, static_cast<u64>(fs));
++    }
++
++    void LoadWebGLCache(const std::atomic_bool& stop_loading, bool accurate_mul) {
++        if (!Settings::values.use_disk_shader_cache || disk_cache.GetProgramID() == 0) return;
++        const auto start = emscripten_get_now();
++        const std::string version = fmt::format("webgl-1:{}:{}", Common::g_shader_cache_version,
++                                                accurate_mul);
++        webgl_cache_key = Common::ComputeHash64(version.data(), version.size());
++        const auto directory = FileUtil::GetUserPath(FileUtil::UserPath::ShaderDir) + "webgl-v1/";
++        if (!FileUtil::CreateFullPath(directory)) return;
++        webgl_cache_path = directory + fmt::format("{:016x}-{}.bin", disk_cache.GetProgramID(),
++                                                   accurate_mul ? 1 : 0);
++        if (!FileUtil::Exists(webgl_cache_path)) {
++            PublishCacheStats();
++            return;
++        }
++        const auto size = FileUtil::GetSize(webgl_cache_path);
++        if (size < 32 || size > WebGLCacheData::MaxBytes) return;
++        std::string bytes;
++        if (FileUtil::ReadFileToString(false, webgl_cache_path, bytes) != size) return;
++        auto decoded = WebGLCacheData::Decode(bytes, webgl_cache_key);
++        if (!decoded) return;
++        webgl_disk_data = std::move(*decoded);
++
++        GLint previous_program = 0;
++        glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
++        std::vector<GLuint> handles(webgl_disk_data.shaders.size());
++        bool failed = false;
++        for (std::size_t i = 0; i < handles.size() && !stop_loading; ++i) {
++            const auto& shader = webgl_disk_data.shaders[i];
++            handles[i] = shader.type == 1 ? fragment_shaders.Preload(shader.source)
++                : shader.source == trivial_vertex_shader.Source() ? trivial_vertex_shader.Get()
++                : programmable_vertex_shaders.Preload(shader.source);
++            if (handles[i]) ++preloaded_shaders;
++            else failed = true;
++        }
++        for (const auto& program : webgl_disk_data.programs) {
++            if (stop_loading) break;
++            const auto vs = handles[program.vs], fs = handles[program.fs];
++            if (!vs || !fs) continue;
++            OGLProgram linked;
++            linked.Create(false, std::array{vs, fs});
++            GLint valid = GL_FALSE;
++            if (linked.handle) glGetProgramiv(linked.handle, GL_LINK_STATUS, &valid);
++            if (!valid) {
++                failed = true;
++                continue;
++            }
++            program_cache.emplace(ProgramKey(vs, fs), std::move(linked));
++            ++preloaded_programs;
++        }
++        glUseProgram(static_cast<GLuint>(previous_program));
++        if (failed) webgl_disk_data = {};
++        preload_ms = emscripten_get_now() - start;
++        PublishCacheStats();
++    }
++
++    void RecordWebGLProgram() {
++        if (webgl_cache_path.empty() || !Settings::values.use_disk_shader_cache) return;
++        const auto vs = current.vs == trivial_vertex_shader.Get()
++            ? trivial_vertex_shader.Source() : programmable_vertex_shaders.FindSource(current.vs);
++        const auto fs = fragment_shaders.FindSource(current.fs);
++        if (!webgl_disk_data.Add(vs, fs)) return;
++        const auto encoded = webgl_disk_data.Encode(webgl_cache_key);
++        const auto temporary = webgl_cache_path + ".tmp";
++        if (FileUtil::WriteStringToFile(false, temporary, encoded) == encoded.size() &&
++            FileUtil::Rename(temporary, webgl_cache_path)) {
++            ++persist_writes;
++        }
++    }
++#endif
++
+     void PublishCacheStats() const {
+ #if defined(__EMSCRIPTEN__)
+         EM_ASM({
+@@ -442,13 +596,22 @@
+             stats.programLookups = $4;
+             stats.programMisses = $5;
+             stats.programCount = $6;
++            stats.preloadedShaders = $7;
++            stats.preloadedPrograms = $8;
++            stats.preloadMs = $9;
++            stats.diskPrograms = $10;
++            stats.diskBytes = $11;
++            stats.persistWrites = $12;
+             globalThis.__AZAHAR_SHADER_CACHE__ = stats;
+         }, static_cast<double>(fragment_shaders.Lookups()),
+                static_cast<double>(fragment_shaders.ConfigMisses()),
+                static_cast<double>(fragment_shaders.SourceMisses()),
+                static_cast<double>(fragment_shaders.SourceHits()),
+                static_cast<double>(program_lookups), static_cast<double>(program_misses),
+-               static_cast<double>(program_cache.size()));
++               static_cast<double>(program_cache.size()), static_cast<double>(preloaded_shaders),
++               static_cast<double>(preloaded_programs), preload_ms,
++               static_cast<double>(webgl_disk_data.programs.size()),
++               static_cast<double>(webgl_disk_data.bytes), static_cast<double>(persist_writes));
+ #endif
+     }
+ 
+@@ -491,6 +654,7 @@
+     impl->current.vs = handle;
+     impl->current.vs_hash = hash;
+ 
++#if !defined(__EMSCRIPTEN__)
+     // Save VS to the disk cache if its a new shader
+     if (result) {
+         auto& disk_cache = impl->disk_cache;
+@@ -504,6 +668,7 @@
+         disk_cache.SaveRaw(raw);
+         disk_cache.SaveDecompiled(unique_identifier, *result, accurate_mul);
+     }
++#endif
+     return true;
+ }
+ 
+@@ -539,6 +704,7 @@
+     if (new_config) {
+         impl->PublishCacheStats();
+     }
++#if !defined(__EMSCRIPTEN__)
+     // Save FS to the disk cache if its a new shader
+     if (result && user.IsCacheable()) {
+         auto& disk_cache = impl->disk_cache;
+@@ -547,6 +713,7 @@
+         disk_cache.SaveRaw(raw);
+         disk_cache.SaveDecompiled(unique_identifier, *result, false);
+     }
++#endif
+ }
+ 
+ void ShaderProgramManager::ApplyTo(OpenGLState& state, bool accurate_mul) {
+@@ -579,8 +746,14 @@
+             ++impl->program_misses;
+             cached_program.Create(false,
+                                   std::array{impl->current.vs, impl->current.gs, impl->current.fs});
++#if defined(__EMSCRIPTEN__)
++            GLint valid = GL_FALSE;
++            if (cached_program.handle) glGetProgramiv(cached_program.handle, GL_LINK_STATUS, &valid);
++            if (valid) impl->RecordWebGLProgram();
++#else
+             auto& disk_cache = impl->disk_cache;
+             disk_cache.SaveDumpToFile(unique_identifier, cached_program.handle, accurate_mul);
++#endif
+             impl->PublishCacheStats();
+         }
+         state.draw.shader_program = cached_program.handle;
+@@ -594,6 +767,10 @@
+ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
+                                          const VideoCore::DiskResourceLoadCallback& callback,
+                                          bool accurate_mul) {
++#if defined(__EMSCRIPTEN__)
++    impl->LoadWebGLCache(stop_loading, accurate_mul);
++    return;
++#endif
+     auto& disk_cache = impl->disk_cache;
+     const auto transferable = disk_cache.LoadTransferable();
+     if (!transferable) {
+diff --git a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+--- a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
++++ b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+@@ -111,7 +111,13 @@
+     int proctex_diff_lut_offset;
+     float proctex_bias;
+     int shadow_texture_bias;
+-    ivec4 lighting_lut_offset[NUM_LIGHTING_SAMPLERS / 4];
++)"
++#if defined(__EMSCRIPTEN__)
++R"(    int alphatest_func;
++    int scissor_mode;
++)"
++#endif
++R"(    ivec4 lighting_lut_offset[NUM_LIGHTING_SAMPLERS / 4];
+     vec3 fog_color;
+     vec2 proctex_noise_f;
+     vec2 proctex_noise_a;
+@@ -160,10 +166,14 @@
+ )";
+ 
+     // Do not do any sort of processing if it's obvious we're not going to pass the alpha test
++#if defined(__EMSCRIPTEN__)
++    out += "if (alphatest_func == 0) discard;\n";
++#else
+     if (config.framebuffer.alpha_test_func == FramebufferRegs::CompareFunc::Never) {
+         out += "discard; }";
+         return out;
+     }
++#endif
+ 
+     // Append the scissor and depth tests
+     WriteScissor();
+@@ -241,6 +251,16 @@
+ }
+ 
+ void FragmentModule::WriteScissor() {
++#if defined(__EMSCRIPTEN__)
++    out += R"(
++if (scissor_mode != 0) {
++    bool inside_scissor = gl_FragCoord.x >= float(scissor_x1) &&
++        gl_FragCoord.y >= float(scissor_y1) && gl_FragCoord.x < float(scissor_x2) &&
++        gl_FragCoord.y < float(scissor_y2);
++    if (scissor_mode == 3 ? !inside_scissor : inside_scissor) discard;
++}
++)";
++#else
+     const auto scissor_mode = config.framebuffer.scissor_test_mode.Value();
+     if (scissor_mode == RasterizerRegs::ScissorMode::Disabled) {
+         return;
+@@ -255,6 +275,7 @@
+            "gl_FragCoord.y >= float(scissor_y1) && "
+            "gl_FragCoord.x < float(scissor_x2) && "
+            "gl_FragCoord.y < float(scissor_y2))) discard;\n";
++#endif
+ }
+ 
+ std::string FragmentModule::GetSource(Pica::TexturingRegs::TevStageConfig::Source source,
+@@ -435,6 +456,18 @@
+ }
+ 
+ void FragmentModule::WriteAlphaTestCondition(FramebufferRegs::CompareFunc func) {
++#if defined(__EMSCRIPTEN__)
++    (void)func;
++    out += R"(
++int alpha_value = int(combiner_output.a * 255.0);
++if ((alphatest_func == 2 && alpha_value != alphatest_ref) ||
++    (alphatest_func == 3 && alpha_value == alphatest_ref) ||
++    (alphatest_func == 4 && alpha_value >= alphatest_ref) ||
++    (alphatest_func == 5 && alpha_value > alphatest_ref) ||
++    (alphatest_func == 6 && alpha_value <= alphatest_ref) ||
++    (alphatest_func == 7 && alpha_value < alphatest_ref)) discard;
++)";
++#else
+     const auto get_cond = [func]() -> std::string {
+         using CompareFunc = Pica::FramebufferRegs::CompareFunc;
+         switch (func) {
+@@ -459,11 +492,24 @@
+         }
+     };
+     out += fmt::format("if ({}) discard;\n", get_cond());
++#endif
+ }
+ 
+ void FragmentModule::WriteTevStage(u32 index) {
+     const TexturingRegs::TevStageConfig stage = config.texture.tev_stages[index];
+     if (!IsPassThroughTevStage(stage)) {
++#if defined(__EMSCRIPTEN__)
++        const std::array color_sources{stage.color_source1.Value(), stage.color_source2.Value(),
++                                       stage.color_source3.Value()};
++        const std::array color_modifiers{stage.color_modifier1.Value(), stage.color_modifier2.Value(),
++                                         stage.color_modifier3.Value()};
++        for (u32 i = 0; i < TevOperandCount(stage.color_op); ++i) {
++            out += fmt::format("color_results_{} = ", i + 1);
++            AppendColorModifier(color_modifiers[i], color_sources[i], index);
++            out += ";\n";
++        }
++        out += fmt::format("vec3 color_output_{} = byteround(", index);
++#else
+         out += "color_results_1 = ";
+         AppendColorModifier(stage.color_modifier1, stage.color_source1, index);
+         out += ";\ncolor_results_2 = ";
+@@ -473,6 +519,7 @@
+ 
+         // Round the output of each TEV stage to maintain the PICA's 8 bits of precision
+         out += fmt::format(";\nvec3 color_output_{} = byteround(", index);
++#endif
+         AppendColorCombiner(stage.color_op);
+         out += ");\n";
+ 
+@@ -480,6 +527,18 @@
+             // result of Dot3_RGBA operation is also placed to the alpha component
+             out += fmt::format("float alpha_output_{0} = color_output_{0}[0];\n", index);
+         } else {
++#if defined(__EMSCRIPTEN__)
++            const std::array alpha_sources{stage.alpha_source1.Value(), stage.alpha_source2.Value(),
++                                           stage.alpha_source3.Value()};
++            const std::array alpha_modifiers{stage.alpha_modifier1.Value(), stage.alpha_modifier2.Value(),
++                                             stage.alpha_modifier3.Value()};
++            for (u32 i = 0; i < TevOperandCount(stage.alpha_op); ++i) {
++                out += fmt::format("alpha_results_{} = ", i + 1);
++                AppendAlphaModifier(alpha_modifiers[i], alpha_sources[i], index);
++                out += ";\n";
++            }
++            out += fmt::format("float alpha_output_{} = byteround(", index);
++#else
+             out += "alpha_results_1 = ";
+             AppendAlphaModifier(stage.alpha_modifier1, stage.alpha_source1, index);
+             out += ";\nalpha_results_2 = ";
+@@ -488,6 +547,7 @@
+             AppendAlphaModifier(stage.alpha_modifier3, stage.alpha_source3, index);
+ 
+             out += fmt::format(";\nfloat alpha_output_{} = byteround(", index);
++#endif
+             AppendAlphaCombiner(stage.alpha_op);
+             out += ");\n";
+         }
+diff --git a/src/video_core/shader/generator/pica_fs_config.cpp b/src/video_core/shader/generator/pica_fs_config.cpp
+--- a/src/video_core/shader/generator/pica_fs_config.cpp
++++ b/src/video_core/shader/generator/pica_fs_config.cpp
+@@ -81,6 +81,15 @@
+             tev_stages[i].modifiers_raw &= 0xFFF;
+             tev_stages[i].ops_raw &= 0xF;
+         }
++#if defined(__EMSCRIPTEN__)
++        // Unused operands cannot change either the result or the shader identity.
++        const u32 colors = TevOperandCount(tev_stage.color_op);
++        const u32 alphas = TevOperandCount(tev_stage.alpha_op);
++        const u32 color_mask = (1U << (colors * 4)) - 1;
++        const u32 alpha_mask = (1U << (alphas * 4)) - 1;
++        tev_stages[i].sources_raw &= color_mask | (alpha_mask << 16);
++        tev_stages[i].modifiers_raw &= color_mask | (alpha_mask << 12);
++#endif
+     }
+ }
+ 
+diff --git a/src/video_core/shader/generator/pica_fs_config.h b/src/video_core/shader/generator/pica_fs_config.h
+--- a/src/video_core/shader/generator/pica_fs_config.h
++++ b/src/video_core/shader/generator/pica_fs_config.h
+@@ -12,6 +12,23 @@
+ #define FIELD_HASH(x) static_cast<u64>(offsetof(T, x)), static_cast<u64>(sizeof(x))
+ 
+ namespace Pica::Shader {
++
++constexpr u32 TevOperandCount(Pica::TexturingRegs::TevStageConfig::Operation operation) {
++    using Operation = Pica::TexturingRegs::TevStageConfig::Operation;
++    switch (operation) {
++    case Operation::Replace:
++        return 1;
++    case Operation::Modulate:
++    case Operation::Add:
++    case Operation::AddSigned:
++    case Operation::Subtract:
++    case Operation::Dot3_RGB:
++    case Operation::Dot3_RGBA:
++        return 2;
++    default:
++        return 3;
++    }
++}
+ 
+ /**
+  * WARNING!
+diff --git a/src/video_core/shader/generator/shader_uniforms.h b/src/video_core/shader/generator/shader_uniforms.h
+--- a/src/video_core/shader/generator/shader_uniforms.h
++++ b/src/video_core/shader/generator/shader_uniforms.h
+@@ -49,6 +49,11 @@
+     int proctex_diff_lut_offset;
+     float proctex_bias;
+     int shadow_texture_bias;
++#if defined(__EMSCRIPTEN__)
++    // Occupy std140 padding without changing the block size or subsequent offsets.
++    int alphatest_func;
++    int scissor_mode;
++#endif
+     alignas(16) Common::Vec4i lighting_lut_offset[LightingRegs::NumLightingSampler / 4];
+     alignas(16) Common::Vec3f fog_color;
+     alignas(8) Common::Vec2f proctex_noise_f;
+@@ -65,6 +70,10 @@
+ 
+ static_assert(sizeof(FSUniformData) == 0x530,
+               "The size of the UniformData does not match the structure in the shader");
++#if defined(__EMSCRIPTEN__)
++static_assert(offsetof(FSUniformData, alphatest_func) == 72);
++static_assert(offsetof(FSUniformData, scissor_mode) == 76);
++#endif
+ static_assert(sizeof(FSUniformData) < 16384,
+               "UniformData structure must be less than 16kb as per the OpenGL spec");
+ 
+diff --git a/src/video_core/renderer_opengl/gl_webgl_cache.h b/src/video_core/renderer_opengl/gl_webgl_cache.h
+new file mode 100644
+--- /dev/null
++++ b/src/video_core/renderer_opengl/gl_webgl_cache.h
+@@ -0,0 +1,148 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++
++#pragma once
++
++#include <algorithm>
++#include <array>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <vector>
++#include "common/hash.h"
++
++namespace OpenGL {
++
++// Source and observed VS/FS pairs, never driver-specific program binaries.
++class WebGLCacheData {
++public:
++    static constexpr std::size_t MaxBytes = 8 * 1024 * 1024;
++    static constexpr std::size_t MaxSourceBytes = 512 * 1024;
++    static constexpr std::size_t MaxShaders = 512;
++    static constexpr std::size_t MaxPrograms = 256;
++
++    struct Shader {
++        u32 type; // 0: vertex, 1: fragment
++        std::string source;
++    };
++    struct Program {
++        u32 vs;
++        u32 fs;
++        bool operator==(const Program&) const = default;
++    };
++
++    bool Add(std::string_view vs, std::string_view fs) {
++        if (!ValidSource(vs) || !ValidSource(fs) || programs.size() >= MaxPrograms) {
++            return false;
++        }
++        const auto find = [&](u32 type, std::string_view source) {
++            for (u32 i = 0; i < shaders.size(); ++i) {
++                if (shaders[i].type == type && shaders[i].source == source) return i;
++            }
++            return static_cast<u32>(shaders.size());
++        };
++        u32 vi = find(0, vs), fi = find(1, fs);
++        const bool new_vs = vi == shaders.size(), new_fs = fi == shaders.size();
++        const std::size_t added = (new_vs ? vs.size() + 8 : 0) +
++                                  (new_fs ? fs.size() + 8 : 0) + 8;
++        if (shaders.size() + new_vs + new_fs > MaxShaders || bytes + added > MaxBytes) {
++            return false;
++        }
++        if (!new_vs && !new_fs &&
++            std::find(programs.begin(), programs.end(), Program{vi, fi}) != programs.end()) {
++            return false;
++        }
++        if (new_vs) {
++            vi = static_cast<u32>(shaders.size());
++            shaders.push_back({0, std::string(vs)});
++        }
++        if (new_fs) {
++            fi = static_cast<u32>(shaders.size());
++            shaders.push_back({1, std::string(fs)});
++        }
++        programs.push_back({vi, fi});
++        bytes += added;
++        return true;
++    }
++
++    std::string Encode(u64 key) const {
++        std::string out = "AZWGL001";
++        out.reserve(bytes);
++        Put(out, key, 8);
++        Put(out, shaders.size(), 4);
++        Put(out, programs.size(), 4);
++        for (const auto& shader : shaders) {
++            Put(out, shader.type, 4);
++            Put(out, shader.source.size(), 4);
++            out += shader.source;
++        }
++        for (const auto& program : programs) {
++            Put(out, program.vs, 4);
++            Put(out, program.fs, 4);
++        }
++        Put(out, Common::ComputeHash64(out.data(), out.size()), 8);
++        return out;
++    }
++
++    static std::optional<WebGLCacheData> Decode(std::string_view input, u64 key) {
++        if (input.size() < 32 || input.size() > MaxBytes || input.substr(0, 8) != "AZWGL001") {
++            return std::nullopt;
++        }
++        std::size_t pos = 8;
++        const auto get = [&](std::size_t count) -> u64 {
++            if (count > input.size() - pos) return 0;
++            u64 value = 0;
++            for (std::size_t i = 0; i < count; ++i) {
++                value |= u64(static_cast<unsigned char>(input[pos++])) << (8 * i);
++            }
++            return value;
++        };
++        if (get(8) != key) return std::nullopt;
++        const u64 shader_count = get(4), program_count = get(4);
++        if (shader_count > MaxShaders || program_count > MaxPrograms) return std::nullopt;
++        WebGLCacheData data;
++        for (u32 i = 0; i < shader_count; ++i) {
++            if (pos + 8 > input.size() - 8) return std::nullopt;
++            const u32 type = static_cast<u32>(get(4));
++            const u64 size = get(4);
++            if (type > 1 || size > MaxSourceBytes || size > input.size() - pos - 8) {
++                return std::nullopt;
++            }
++            const auto source = input.substr(pos, size);
++            if (!ValidSource(source)) return std::nullopt;
++            data.shaders.push_back({type, std::string(source)});
++            pos += size;
++        }
++        if (program_count * 8 + 8 != input.size() - pos) return std::nullopt;
++        for (u32 i = 0; i < program_count; ++i) {
++            Program program{static_cast<u32>(get(4)), static_cast<u32>(get(4))};
++            if (program.vs >= data.shaders.size() || program.fs >= data.shaders.size() ||
++                data.shaders[program.vs].type != 0 || data.shaders[program.fs].type != 1) {
++                return std::nullopt;
++            }
++            data.programs.push_back(program);
++        }
++        const auto expected = Common::ComputeHash64(input.data(), input.size() - 8);
++        if (get(8) != expected) return std::nullopt;
++        data.bytes = input.size();
++        return data;
++    }
++
++    std::vector<Shader> shaders;
++    std::vector<Program> programs;
++    std::size_t bytes = 32;
++
++private:
++    static bool ValidSource(std::string_view source) {
++        return !source.empty() && source.size() <= MaxSourceBytes &&
++               source.find('\0') == std::string_view::npos;
++    }
++    static void Put(std::string& out, u64 value, std::size_t count) {
++        for (std::size_t i = 0; i < count; ++i) {
++            out.push_back(static_cast<char>((value >> (8 * i)) & 255));
++        }
++    }
++};
++
++} // namespace OpenGL

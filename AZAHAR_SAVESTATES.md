@@ -34,6 +34,11 @@ or runahead, which would repeatedly serialize hundreds of megabytes during play.
   `UNPACK_ROW_LENGTH`, and restore its previous value on every return and
   exception path. Direct desktop downloads use the same guard. This corrects
   a readback state leak without changing pixel-upload behavior.
+- Shader-cache initialization returns immediately when the driver reports no
+  program binary formats. Emscripten reports zero, and querying the empty
+  vector's null output pointer leaves `GL_INVALID_VALUE` pending. The first
+  D24S8 state readback then reported that unrelated error as its own failure.
+  This guard is carried in `azahar-wasm-performance.patch`.
 
 The new synchronous API is exported only by Azahar. Its frontend must detect
 `Module._load_state_sync` before calling
@@ -61,7 +66,7 @@ State save/load may briefly pause a large 3DS game. Rewind and runahead remain
 disabled. Enabling C++ exception handling can affect generated code size and
 performance; benchmark the rebuilt artifact in the target browser.
 
-Actual GPU-enabled browser testing confirmed an `INVALID_ENUM` when saving a
+Earlier GPU-enabled browser testing confirmed an `INVALID_ENUM` when saving a
 256-by-416 D24S8 surface; the other seven RGBA readbacks succeeded. The WebGL
 download patch targets that demonstrated failure. The current GPU implementation
 already marks restored registers, uniforms and lookup tables dirty and
@@ -76,6 +81,7 @@ Run from this repository:
 ```bash
 node tools/test-azahar-savestates.mjs
 node tools/test-azahar-readback-state.mjs
+node tools/test-azahar-webgl-readback.mjs
 bash tools/test-azahar-shader-decoder.sh
 ```
 
@@ -105,6 +111,17 @@ with strict equality. An initial 24-bit half-unit tie exposed implementation-
 dependent GLSL `round()` behavior. The shader now uses explicit half-up rounding
 with integer correction, avoiding an additional floating-point rounding step for
 large odd integers. No depth tolerance was added to the tests.
+
+`test-azahar-webgl-readback.mjs` builds a standalone browser fixture from the
+actual shader-format query, GL state/resource management, shader compilation and
+depth/stencil download sources. Evaluate the printed `run.js` file through CDP
+in a WebGL2 page; it creates a separate canvas and never uses the game context.
+Only logging and profiling are stubbed. The fixture deliberately keeps pending
+errors between shader-cache initialization and capture, matching the core.
+Before the empty-format guard, its first capture reproduced
+`WebGL depth/stencil readback failed`; subsequent captures passed. After the
+guard, all three captures passed strict equality for 106,496 D24S8 pixels each.
+This checks the demonstrated first-save regression, not whole-game restoration.
 
 Rebuild using the existing builder image and cached source tree:
 

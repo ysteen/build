@@ -1,0 +1,826 @@
+diff --git a/src/video_core/CMakeLists.txt b/src/video_core/CMakeLists.txt
+--- a/src/video_core/CMakeLists.txt
++++ b/src/video_core/CMakeLists.txt
+@@ -71,6 +71,8 @@
+     shader/debug_data.h
+     shader/generator/glsl_fs_shader_gen.cpp
+     shader/generator/glsl_fs_shader_gen.h
++    shader/generator/glsl_webgl_generic.cpp
++    shader/generator/glsl_webgl_generic.h
+     shader/generator/glsl_shader_decompiler.cpp
+     shader/generator/glsl_shader_decompiler.h
+     shader/generator/glsl_shader_gen.cpp
+diff --git a/src/video_core/renderer_opengl/gl_shader_manager.cpp b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -11,9 +11,13 @@
+ #include <variant>
+ #if defined(__EMSCRIPTEN__)
+ #include <emscripten.h>
++#include <emscripten/html5.h>
+ #include "common/file_util.h"
+ #include "common/scm_rev.h"
+ #include "video_core/renderer_opengl/gl_webgl_cache.h"
++#include "video_core/renderer_opengl/gl_webgl_stats.h"
++#include "video_core/renderer_opengl/gl_shader_util.h"
++#include "video_core/shader/generator/glsl_webgl_generic.h"
+ #endif
+ #include "common/hash.h"
+ #include "common/settings.h"
+@@ -151,6 +155,12 @@
+ 
+ #if defined(__EMSCRIPTEN__)
+     std::string_view Source() const { return source_code; }
++    void StoreSource(std::string source) { source_code = std::move(source); }
++    void CompileStored(bool asynchronous) {
++        if (GetHandle()) return;
++        std::get<OGLShader>(shader_or_program).handle =
++            LoadShader(source_code, GL_FRAGMENT_SHADER, "fragment", !asynchronous);
++    }
+ #endif
+ 
+ private:
+@@ -313,12 +323,15 @@
+ 
+     std::tuple<u64, GLuint, std::optional<std::string>, bool> Get(
+         const FSConfig& config, const Pica::Shader::UserConfig& user,
+-        const Pica::Shader::Profile& profile) {
++        const Pica::Shader::Profile& profile, bool asynchronous = false, bool defer = false) {
+         ++lookups;
+ 
+         const u64 config_hash = GetEffectiveConfigHash(config, user.raw, profile);
+         const auto map_it = shader_map.find(config_hash);
+         if (map_it != shader_map.end()) {
++#if defined(__EMSCRIPTEN__)
++            if (!defer) map_it->second->CompileStored(asynchronous);
++#endif
+             return {config_hash, map_it->second->GetHandle(), std::nullopt, false};
+         }
+ 
+@@ -332,10 +345,18 @@
+         if (new_source) {
+             ++source_misses;
+             result = std::move(source);
++#if defined(__EMSCRIPTEN__)
++            cached_shader.StoreSource(*result);
++#else
+             cached_shader.Create(result->c_str(), GL_FRAGMENT_SHADER);
++#endif
+         } else {
+             ++source_hits;
+         }
++
++#if defined(__EMSCRIPTEN__)
++        if (!defer) cached_shader.CompileStored(asynchronous);
++#endif
+ 
+         shader_map.emplace(config_hash, &cached_shader);
+         return {config_hash, cached_shader.GetHandle(), std::move(result), true};
+@@ -510,12 +531,167 @@
+     u64 preloaded_programs{};
+     u64 persist_writes{};
+     double preload_ms{};
++    bool parallel_compile{};
++    bool generic_initialized{};
++    OGLShader generic_fragment;
++    OGLBuffer generic_buffer;
++    std::unordered_map<GLuint, OGLProgram> generic_programs;
++    std::optional<GLSL::WebGLFSConfigData> generic_config;
++    std::optional<GLSL::WebGLFSConfigData> uploaded_generic_config;
++    struct PendingProgram {
++        OGLProgram program;
++        GLuint vs{}, fs{};
++    };
++    static constexpr std::size_t MaxPendingPrograms = 4;
++    static constexpr GLenum CompletionStatusKHR = 0x91B1;
++    std::unordered_map<u64, PendingProgram> pending_programs;
++    std::set<u64> failed_programs;
++    double last_poll_ms{};
++    double last_stats_ms{};
++    double generic_init_ms{};
++    u64 generic_draws{};
++    u64 async_queued{};
++    u64 async_completed{};
++    u64 async_failed{};
++    u64 deferred_draws{};
++    u64 synchronous_misses{};
++    std::size_t peak_pending{};
++
++    GLuint PrepareGenericProgram(GLuint vs) {
++        if (!parallel_compile || !generic_fragment.handle) return 0;
++        auto [it, inserted] = generic_programs.try_emplace(vs);
++        if (inserted) {
++            // Once per vertex shader, normally during startup cache loading. Novel vertex
++            // programs still use the existing synchronous path in this fragment-only change.
++            it->second.handle = LoadProgram(false, std::array{vs, generic_fragment.handle},
++                                            "generic fragment", false);
++            if (it->second.handle && !FinalizeProgram(it->second.handle, "generic fragment"))
++                it->second.Release();
++        }
++        return it->second.handle;
++    }
++
++    void InitializeGeneric() {
++        if (generic_initialized) return;
++        generic_initialized = true;
++        parallel_compile = !separable && emscripten_webgl_enable_extension(
++            emscripten_webgl_get_current_context(), "KHR_parallel_shader_compile");
++        if (!parallel_compile) return;
++        const double start = emscripten_get_now();
++        generic_fragment.handle = LoadShader(GLSL::GenerateWebGLGenericFragmentShader(),
++                                              GL_FRAGMENT_SHADER, "generic fragment", false);
++        if (!PrepareGenericProgram(trivial_vertex_shader.Get())) {
++            parallel_compile = false;
++            generic_fragment.Release();
++            return;
++        }
++        generic_buffer.Create();
++        glBindBuffer(GL_UNIFORM_BUFFER, generic_buffer.handle);
++        glBufferData(GL_UNIFORM_BUFFER, sizeof(GLSL::WebGLFSConfigData), nullptr, GL_STREAM_DRAW);
++        glBindBuffer(GL_UNIFORM_BUFFER, OpenGLState::GetCurState().draw.uniform_buffer);
++        generic_init_ms = emscripten_get_now() - start;
++        PublishCacheStats();
++    }
++
++    void PollPendingPrograms() {
++        if (!parallel_compile) return;
++        const double now = emscripten_get_now();
++        if (now - last_poll_ms < 8.0) return;
++        last_poll_ms = now;
++        if (emscripten_is_webgl_context_lost(emscripten_webgl_get_current_context())) return;
++        bool changed = false;
++        for (auto it = pending_programs.begin(); it != pending_programs.end();) {
++            GLint completed = GL_FALSE;
++            glGetProgramiv(it->second.program.handle, CompletionStatusKHR, &completed);
++            if (!completed) { ++it; continue; }
++            auto& pending = it->second;
++            if (FinalizeProgram(pending.program.handle, "async fragment")) {
++                program_cache.emplace(it->first, std::move(pending.program));
++                RecordWebGLProgram(pending.vs, pending.fs);
++                ++async_completed;
++            } else {
++                failed_programs.insert(it->first);
++                ++async_failed;
++            }
++            it = pending_programs.erase(it);
++            changed = true;
++        }
++        if (changed || now - last_stats_ms >= 1000.0) {
++            last_stats_ms = now;
++            PublishCacheStats();
++        }
++    }
++
++    GLuint GetWebGLProgram(OpenGLState& state) {
++        ++program_lookups;
++        const auto key = ProgramKey(current.vs, current.fs);
++        if (current.fs) {
++            if (const auto it = program_cache.find(key); it != program_cache.end())
++                return it->second.handle;
++        }
++        const GLuint generic = generic_config ? PrepareGenericProgram(current.vs) : 0;
++        if (generic) {
++            if (current.fs && !pending_programs.contains(key) && !failed_programs.contains(key) &&
++                pending_programs.size() < MaxPendingPrograms) {
++                PendingProgram pending;
++                pending.vs = current.vs;
++                pending.fs = current.fs;
++                pending.program.handle = LoadProgram(false, std::array{current.vs, current.fs},
++                                                       "async fragment", false);
++                if (pending.program.handle) {
++                    pending_programs.emplace(key, std::move(pending));
++                    ++program_misses;
++                    ++async_queued;
++                    peak_pending = std::max(peak_pending, pending_programs.size());
++                } else {
++                    failed_programs.insert(key);
++                    ++async_failed;
++                }
++                PublishCacheStats();
++            } else if (!current.fs || (!pending_programs.contains(key) &&
++                                       !failed_programs.contains(key))) {
++                ++deferred_draws;
++            }
++            if (uploaded_generic_config != generic_config) {
++                glBindBuffer(GL_UNIFORM_BUFFER, generic_buffer.handle);
++                glBufferSubData(GL_UNIFORM_BUFFER, 0, sizeof(*generic_config), &*generic_config);
++                uploaded_generic_config = generic_config;
++            }
++            glBindBufferBase(GL_UNIFORM_BUFFER, 3, generic_buffer.handle);
++            glBindBuffer(GL_UNIFORM_BUFFER, state.draw.uniform_buffer);
++            ++generic_draws;
++            return generic;
++        }
++        // Features not represented by the generic shader keep their exact existing renderer.
++        if (const auto it = pending_programs.find(key); it != pending_programs.end()) {
++            auto& pending = it->second;
++            if (FinalizeProgram(pending.program.handle, "synchronous fragment")) {
++                RecordWebGLProgram(pending.vs, pending.fs);
++                auto [ready, inserted] = program_cache.emplace(key, std::move(pending.program));
++                pending_programs.erase(it);
++                ++synchronous_misses;
++                PublishCacheStats();
++                return ready->second.handle;
++            }
++            pending_programs.erase(it);
++        }
++        OGLProgram& program = program_cache[key];
++        program.handle = LoadProgram(false, std::array{current.vs, current.fs},
++                                      "synchronous fragment", false);
++        if (program.handle && FinalizeProgram(program.handle, "synchronous fragment"))
++            RecordWebGLProgram(current.vs, current.fs);
++        ++program_misses;
++        ++synchronous_misses;
++        PublishCacheStats();
++        return program.handle;
++    }
+ 
+     static u64 ProgramKey(GLuint vs, GLuint fs) {
+         return Common::HashCombine(u64{}, static_cast<u64>(vs), u64{}, static_cast<u64>(fs));
+     }
+ 
+     void LoadWebGLCache(const std::atomic_bool& stop_loading, bool accurate_mul) {
++        InitializeGeneric();
+         if (!Settings::values.use_disk_shader_cache || disk_cache.GetProgramID() == 0) return;
+         const auto start = emscripten_get_now();
+         const std::string version = fmt::format("webgl-1:{}:{}", Common::g_shader_cache_version,
+@@ -548,6 +724,7 @@
+                 : programmable_vertex_shaders.Preload(shader.source);
+             if (handles[i]) ++preloaded_shaders;
+             else failed = true;
++            if (shader.type == 0 && handles[i]) PrepareGenericProgram(handles[i]);
+         }
+         for (const auto& program : webgl_disk_data.programs) {
+             if (stop_loading) break;
+@@ -570,11 +747,11 @@
+         PublishCacheStats();
+     }
+ 
+-    void RecordWebGLProgram() {
++    void RecordWebGLProgram(GLuint vertex, GLuint fragment) {
+         if (webgl_cache_path.empty() || !Settings::values.use_disk_shader_cache) return;
+-        const auto vs = current.vs == trivial_vertex_shader.Get()
+-            ? trivial_vertex_shader.Source() : programmable_vertex_shaders.FindSource(current.vs);
+-        const auto fs = fragment_shaders.FindSource(current.fs);
++        const auto vs = vertex == trivial_vertex_shader.Get()
++            ? trivial_vertex_shader.Source() : programmable_vertex_shaders.FindSource(vertex);
++        const auto fs = fragment_shaders.FindSource(fragment);
+         if (!webgl_disk_data.Add(vs, fs)) return;
+         const auto encoded = webgl_disk_data.Encode(webgl_cache_key);
+         const auto temporary = webgl_cache_path + ".tmp";
+@@ -587,23 +764,7 @@
+ 
+     void PublishCacheStats() const {
+ #if defined(__EMSCRIPTEN__)
+-        EM_ASM({
+-            const stats = {};
+-            stats.fragmentLookups = $0;
+-            stats.fragmentConfigMisses = $1;
+-            stats.fragmentSourceMisses = $2;
+-            stats.fragmentSourceHits = $3;
+-            stats.programLookups = $4;
+-            stats.programMisses = $5;
+-            stats.programCount = $6;
+-            stats.preloadedShaders = $7;
+-            stats.preloadedPrograms = $8;
+-            stats.preloadMs = $9;
+-            stats.diskPrograms = $10;
+-            stats.diskBytes = $11;
+-            stats.persistWrites = $12;
+-            globalThis.__AZAHAR_SHADER_CACHE__ = stats;
+-        }, static_cast<double>(fragment_shaders.Lookups()),
++        PublishWebGLStats({static_cast<double>(fragment_shaders.Lookups()),
+                static_cast<double>(fragment_shaders.ConfigMisses()),
+                static_cast<double>(fragment_shaders.SourceMisses()),
+                static_cast<double>(fragment_shaders.SourceHits()),
+@@ -611,7 +772,12 @@
+                static_cast<double>(program_cache.size()), static_cast<double>(preloaded_shaders),
+                static_cast<double>(preloaded_programs), preload_ms,
+                static_cast<double>(webgl_disk_data.programs.size()),
+-               static_cast<double>(webgl_disk_data.bytes), static_cast<double>(persist_writes));
++               static_cast<double>(webgl_disk_data.bytes), static_cast<double>(persist_writes),
++               static_cast<double>(parallel_compile), generic_init_ms, static_cast<double>(generic_programs.size()),
++               static_cast<double>(generic_draws), static_cast<double>(async_queued),
++               static_cast<double>(async_completed), static_cast<double>(async_failed),
++               static_cast<double>(pending_programs.size()), static_cast<double>(peak_pending),
++               static_cast<double>(deferred_draws), static_cast<double>(synchronous_misses)});
+ #endif
+     }
+ 
+@@ -653,6 +819,9 @@
+         return false;
+     impl->current.vs = handle;
+     impl->current.vs_hash = hash;
++#if defined(__EMSCRIPTEN__)
++    impl->PrepareGenericProgram(handle);
++#endif
+ 
+ #if !defined(__EMSCRIPTEN__)
+     // Save VS to the disk cache if its a new shader
+@@ -697,8 +866,21 @@
+ void ShaderProgramManager::UseFragmentShader(const Pica::RegsInternal& regs,
+                                              const Pica::Shader::UserConfig& user) {
+     const FSConfig fs_config{regs};
++#if defined(__EMSCRIPTEN__)
++    impl->InitializeGeneric();
++    impl->PollPendingPrograms();
++    impl->generic_config = impl->parallel_compile
++        ? GLSL::MakeWebGLGenericConfig(fs_config, user, impl->profile) : std::nullopt;
++    if (impl->generic_config && impl->current.vs &&
++        !impl->PrepareGenericProgram(impl->current.vs)) impl->generic_config.reset();
++    const bool asynchronous = impl->generic_config.has_value();
++    const bool defer = asynchronous && impl->pending_programs.size() >= Impl::MaxPendingPrograms;
++    auto [hash, handle, result, new_config] =
++        impl->fragment_shaders.Get(fs_config, user, impl->profile, asynchronous, defer);
++#else
+     auto [hash, handle, result, new_config] =
+         impl->fragment_shaders.Get(fs_config, user, impl->profile);
++#endif
+     impl->current.fs = handle;
+     impl->current.fs_hash = hash;
+     if (new_config) {
+@@ -717,6 +899,10 @@
+ }
+ 
+ void ShaderProgramManager::ApplyTo(OpenGLState& state, bool accurate_mul) {
++#if defined(__EMSCRIPTEN__)
++    state.draw.shader_program = impl->GetWebGLProgram(state);
++    return;
++#endif
+     if (impl->separable) {
+         if (driver.HasBug(DriverBug::ShaderStageChangeFreeze)) {
+             glUseProgramStages(
+@@ -749,7 +935,7 @@
+ #if defined(__EMSCRIPTEN__)
+             GLint valid = GL_FALSE;
+             if (cached_program.handle) glGetProgramiv(cached_program.handle, GL_LINK_STATUS, &valid);
+-            if (valid) impl->RecordWebGLProgram();
++            if (valid) impl->RecordWebGLProgram(impl->current.vs, impl->current.fs);
+ #else
+             auto& disk_cache = impl->disk_cache;
+             disk_cache.SaveDumpToFile(unique_identifier, cached_program.handle, accurate_mul);
+diff --git a/src/video_core/renderer_opengl/gl_shader_util.cpp b/src/video_core/renderer_opengl/gl_shader_util.cpp
+--- a/src/video_core/renderer_opengl/gl_shader_util.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_util.cpp
+@@ -9,11 +9,12 @@
+ #include "common/assert.h"
+ #include "common/logging/log.h"
+ #include "video_core/renderer_opengl/gl_shader_util.h"
++#include "video_core/renderer_opengl/gl_state.h"
+ #include "video_core/renderer_opengl/gl_vars.h"
+ 
+ namespace OpenGL {
+ 
+-GLuint LoadShader(std::string_view source, GLenum type, const std::string& debug_name) {
++GLuint LoadShader(std::string_view source, GLenum type, const std::string& debug_name, bool wait) {
+     std::string preamble;
+ #if defined(__EMSCRIPTEN__)
+     preamble = "#version 300 es\nprecision highp float;\nprecision highp int;\n";
+@@ -69,6 +70,9 @@
+     glShaderSource(shader_id, static_cast<GLsizei>(src_arr.size()), src_arr.data(), lengths.data());
+     LOG_DEBUG(Render_OpenGL, "Compiling {} shader {}...", debug_type, debug_name);
+     glCompileShader(shader_id);
++    // Status/log queries synchronize with ANGLE. A pending shader can be attached and linked
++    // immediately; KHR_parallel_shader_compile will report completion on the resulting program.
++    if (!wait) return shader_id;
+ 
+     GLint result = GL_FALSE;
+     GLint info_log_length;
+@@ -94,11 +98,12 @@
+ }
+ 
+ GLuint LoadProgram(bool separable_program, std::span<const GLuint> shaders,
+-                   const std::string& debug_name) {
++                   const std::string& debug_name, bool wait) {
+     // Link the program
+     LOG_DEBUG(Render_OpenGL, "Linking program...");
+ 
+     GLuint program_id = glCreateProgram();
++    if (!program_id) return 0;
+ 
+     for (GLuint shader : shaders) {
+         if (shader != 0) {
+@@ -115,6 +120,15 @@
+     (void)separable_program;
+ #endif
+     glLinkProgram(program_id);
++
++    for (GLuint shader : shaders) {
++        if (shader != 0) glDetachShader(program_id, shader);
++    }
++    if (wait) FinalizeProgram(program_id, debug_name);
++    return program_id;
++}
++
++bool FinalizeProgram(GLuint program_id, const std::string& debug_name) {
+ 
+     // Check the program
+     GLint result = GL_FALSE;
+@@ -133,12 +147,6 @@
+         }
+     } else if (result == GL_FALSE) {
+         LOG_ERROR(Render_OpenGL, "Error linking shader {}: No log produced.", debug_name);
+-    }
+-
+-    for (GLuint shader : shaders) {
+-        if (shader != 0) {
+-            glDetachShader(program_id, shader);
+-        }
+     }
+ 
+ #if defined(__EMSCRIPTEN__)
+@@ -168,11 +176,13 @@
+         set_block("vs_pica_data", 0);
+         set_block("vs_data", 1);
+         set_block("fs_data", 2);
+-        glUseProgram(0);
++        set_block("pica_generic_config", 3);
++        // Finalization also runs between draws. Keep the tracked and actual GL state equal.
++        glUseProgram(OpenGLState::GetCurState().draw.shader_program);
+     }
+ #endif
+ 
+-    return program_id;
++    return result == GL_TRUE;
+ }
+ 
+ } // namespace OpenGL
+diff --git a/src/video_core/renderer_opengl/gl_shader_util.h b/src/video_core/renderer_opengl/gl_shader_util.h
+--- a/src/video_core/renderer_opengl/gl_shader_util.h
++++ b/src/video_core/renderer_opengl/gl_shader_util.h
+@@ -15,7 +15,8 @@
+  * @param type Type of the shader (GL_VERTEX_SHADER, GL_GEOMETRY_SHADER or GL_FRAGMENT_SHADER)
+  * @param debug_name debug name to show in logs
+  */
+-GLuint LoadShader(std::string_view source, GLenum type, const std::string& debug_name);
++GLuint LoadShader(std::string_view source, GLenum type, const std::string& debug_name,
++                  bool wait = true);
+ 
+ /**
+  * Utility function to create and link an OpenGL GLSL shader program
+@@ -25,6 +26,9 @@
+  * @returns Handle of the newly created OpenGL program object
+  */
+ GLuint LoadProgram(bool separable_program, std::span<const GLuint> shaders,
+-                   const std::string& debug_name);
++                   const std::string& debug_name, bool wait = true);
++
++// Call only after completion when LoadProgram was issued with wait=false.
++bool FinalizeProgram(GLuint program, const std::string& debug_name);
+ 
+ } // namespace OpenGL
+diff --git a/src/video_core/renderer_opengl/gl_webgl_stats.h b/src/video_core/renderer_opengl/gl_webgl_stats.h
+new file mode 100644
+--- /dev/null
++++ b/src/video_core/renderer_opengl/gl_webgl_stats.h
+@@ -0,0 +1,24 @@
++#pragma once
++
++#include <array>
++#include <emscripten.h>
++
++namespace OpenGL {
++// Pass one pointer instead of 24 EM_ASM operands. Older Emscripten glue only declares $0..$15.
++inline void PublishWebGLStats(const std::array<double, 24>& data) {
++    EM_ASM({
++        const keys = ([
++            "fragmentLookups", "fragmentConfigMisses", "fragmentSourceMisses", "fragmentSourceHits",
++            "programLookups", "programMisses", "programCount", "preloadedShaders",
++            "preloadedPrograms", "preloadMs", "diskPrograms", "diskBytes", "persistWrites",
++            "parallelCompile", "genericInitMs", "genericPrograms", "genericDraws",
++            "asyncQueued", "asyncCompleted", "asyncFailed", "asyncPending", "asyncPeakPending",
++            "deferredDraws", "synchronousMisses"
++        ]);
++        const stats = {};
++        for (let i = 0; i < keys.length; ++i) stats[keys[i]] = HEAPF64[($0 >> 3) + i];
++        stats.parallelCompile = !!stats.parallelCompile;
++        globalThis.__AZAHAR_SHADER_CACHE__ = stats;
++    }, data.data());
++}
++} // namespace OpenGL
+diff --git a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+--- a/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
++++ b/src/video_core/shader/generator/glsl_fs_shader_gen.cpp
+@@ -1795,7 +1795,7 @@
+             texture_unit == 2 && config.texture.texture2_use_coord1 ? 1 : texture_unit;
+         if (config.texture.texture_border_color[texture_unit].enable_s) {
+             out += fmt::format(R"(
+-                if (texcoord{}.x < 0 || texcoord{}.x > 1) {{
++                if (texcoord{}.x < 0.0 || texcoord{}.x > 1.0) {{
+                     return tex_border_color[{}];
+                 }}
+                 )",
+@@ -1803,7 +1803,7 @@
+         }
+         if (config.texture.texture_border_color[texture_unit].enable_t) {
+             out += fmt::format(R"(
+-                if (texcoord{}.y < 0 || texcoord{}.y > 1) {{
++                if (texcoord{}.y < 0.0 || texcoord{}.y > 1.0) {{
+                     return tex_border_color[{}];
+                 }}
+                 )",
+@@ -1873,4 +1873,8 @@
+     return module.Generate();
+ }
+ 
++std::string_view GetFragmentUniformBlock() {
++    return FSUniformBlockDef;
++}
++
+ } // namespace Pica::Shader::Generator::GLSL
+diff --git a/src/video_core/shader/generator/glsl_fs_shader_gen.h b/src/video_core/shader/generator/glsl_fs_shader_gen.h
+--- a/src/video_core/shader/generator/glsl_fs_shader_gen.h
++++ b/src/video_core/shader/generator/glsl_fs_shader_gen.h
+@@ -101,4 +101,6 @@
+ std::string GenerateFragmentShader(const FSConfig& config, const UserConfig& user,
+                                    const Profile& profile);
+ 
++std::string_view GetFragmentUniformBlock();
++
+ } // namespace Pica::Shader::Generator::GLSL
+diff --git a/src/video_core/shader/generator/glsl_webgl_generic.cpp b/src/video_core/shader/generator/glsl_webgl_generic.cpp
+new file mode 100644
+--- /dev/null
++++ b/src/video_core/shader/generator/glsl_webgl_generic.cpp
+@@ -0,0 +1,230 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++#include "video_core/shader/generator/glsl_fs_shader_gen.h"
++#include "video_core/shader/generator/glsl_webgl_generic.h"
++
++namespace Pica::Shader::Generator::GLSL {
++std::optional<WebGLFSConfigData> MakeWebGLGenericConfig(const FSConfig& input,
++                                                       const UserConfig& user,
++                                                       const Profile& profile) {
++    using Stage = Pica::TexturingRegs::TevStageConfig;
++    using Texture = Pica::TexturingRegs::TextureConfig;
++    FSConfig config{input};
++    config.ApplyProfile(profile);
++    const u32 texture_type = static_cast<u32>(config.texture.texture0_type.Value());
++    const u32 fog = static_cast<u32>(config.texture.fog_mode.Value());
++    const auto logic = config.framebuffer.logic_op.Value();
++    if (profile.is_vulkan || !profile.has_minus_one_to_one_range || !user.IsCacheable() ||
++        config.lighting.enable || config.proctex.enable ||
++        config.framebuffer.shadow_rendering || config.EmulateBlend() ||
++        (texture_type != Texture::Texture2D && texture_type != Texture::Projection2D &&
++         texture_type != Texture::Disabled) || (fog != 0 && fog != 5) ||
++        (logic != FramebufferRegs::LogicOp::Copy && logic != FramebufferRegs::LogicOp::Clear &&
++         logic != FramebufferRegs::LogicOp::Set && logic != FramebufferRegs::LogicOp::NoOp)) {
++        return std::nullopt;
++    }
++    WebGLFSConfigData data;
++    data.texture = {texture_type, config.texture.texture2_use_coord1.Value(),
++                    config.texture.combiner_buffer_input.Value(), 0};
++    data.misc = {static_cast<u32>(config.framebuffer.depthmap_enable.Value()), fog,
++                 config.texture.fog_flip.Value(), static_cast<u32>(logic)};
++    data.control[3] = 6;
++    for (u32 i = 0; i < 3; ++i) {
++        data.texture[3] |= (config.texture.texture_border_color[i].raw & 3) << (i * 2);
++    }
++    for (u32 i = 0; i < 6; ++i) {
++        const Stage stage = config.texture.tev_stages[i];
++        const auto& raw = config.texture.tev_stages[i];
++        data.tev[i] = {raw.sources_raw, raw.modifiers_raw, raw.ops_raw, raw.scales_raw};
++        const u32 color_op = static_cast<u32>(stage.color_op.Value());
++        const u32 alpha_op = static_cast<u32>(stage.alpha_op.Value());
++        if (color_op > 9 || (color_op != 7 && (alpha_op > 9 || alpha_op == 6 || alpha_op == 7))) {
++            return std::nullopt;
++        }
++        const bool passthrough = color_op == 0 && alpha_op == 0 &&
++            stage.color_source1 == Stage::Source::Previous &&
++            stage.alpha_source1 == Stage::Source::Previous &&
++            stage.color_modifier1 == Stage::ColorModifier::SourceColor &&
++            stage.alpha_modifier1 == Stage::AlphaModifier::SourceAlpha &&
++            stage.GetColorMultiplier() == 1 && stage.GetAlphaMultiplier() == 1;
++        if (passthrough) continue;
++        data.control[0] |= 1U << i;
++        for (u32 channel = 0; channel < 2; ++channel) {
++            if (channel && color_op == 7) continue;
++            const u32 count = TevOperandCount(channel ? stage.alpha_op.Value() : stage.color_op.Value());
++            for (u32 operand = 0; operand < count; ++operand) {
++                const u32 shift = channel * 16 + operand * 4;
++                u32 source = (raw.sources_raw >> shift) & 15;
++                if (i == 0 && source == 15) {
++                    source = (raw.sources_raw >> (channel * 16 + 8)) & 15;
++                    data.tev[i][0] = (data.tev[i][0] & ~(15U << shift)) | (source << shift);
++                }
++                const u32 modifier = (raw.modifiers_raw >> (channel * 12 + operand * 4)) &
++                                     (channel ? 7 : 15);
++                if ((source > 6 && source < 13) ||
++                    (!channel && modifier > 5 && modifier != 8 && modifier != 9 &&
++                     modifier != 12 && modifier != 13)) {
++                    return std::nullopt;
++                }
++                if (source >= 3 && source <= 5) data.control[1] |= 1U << (source - 3);
++            }
++        }
++    }
++    return data;
++}
++
++std::string GenerateWebGLGenericFragmentShader() {
++    std::string source = R"(
++in vec4 primary_color;
++in vec2 texcoord0;
++in vec2 texcoord1;
++in vec2 texcoord2;
++in float texcoord0_w;
++layout(location = 0) out vec4 color;
++)";
++    source += GetFragmentUniformBlock();
++    source += R"(
++layout(std140) uniform pica_generic_config {
++    uvec4 pica_tev[6];
++    uvec4 pica_texture;
++    uvec4 pica_misc;
++    uvec4 pica_control;
++};
++uniform sampler2D tex0;
++uniform sampler2D tex1;
++uniform sampler2D tex2;
++uniform sampler2D texture_buffer_lut_lf;
++float byteround(float x) { return round(x * 255.0) * (1.0 / 255.0); }
++vec3 byteround(vec3 x) { return round(x * 255.0) * (1.0 / 255.0); }
++vec4 byteround(vec4 x) { return round(x * 255.0) * (1.0 / 255.0); }
++float getLod(vec2 coord) {
++    vec2 d = max(abs(dFdx(coord)), abs(dFdy(coord)));
++    return log2(max(d.x, d.y));
++}
++vec4 sampleGenericTexture(sampler2D tex, vec2 coord, int unit, bool projection) {
++    uint border = (pica_texture.w >> uint(unit * 2)) & 3u;
++    if (((border & 1u) != 0u && (coord.x < 0.0 || coord.x > 1.0)) ||
++        ((border & 2u) != 0u && (coord.y < 0.0 || coord.y > 1.0))) return tex_border_color[unit];
++    if (projection) return textureProj(tex, vec3(coord, texcoord0_w));
++    return textureLod(tex, coord, getLod(coord * vec2(textureSize(tex, 0))) + tex_lod_bias[unit]);
++}
++vec4 selectSource(uint selector, vec4 primary, vec4 previous, vec4 buffer_color,
++                  vec4 constant_color, vec4 t0, vec4 t1, vec4 t2) {
++    if (selector == 0u) return primary;
++    if (selector == 3u) return t0;
++    if (selector == 4u) return t1;
++    if (selector == 5u) return t2;
++    if (selector == 13u) return buffer_color;
++    if (selector == 14u) return constant_color;
++    if (selector == 15u) return previous;
++    return vec4(0.0);
++}
++vec3 modifyColor(vec4 value, uint modifier) {
++    vec3 result = value.rgb;
++    if (modifier / 2u == 1u) result = value.aaa;
++    if (modifier / 2u == 2u) result = value.rrr;
++    if (modifier / 2u == 4u) result = value.ggg;
++    if (modifier / 2u == 6u) result = value.bbb;
++    return (modifier & 1u) == 0u ? result : vec3(1.0) - result;
++}
++float modifyAlpha(vec4 value, uint modifier) {
++    float result = value.a;
++    if (modifier / 2u == 1u) result = value.r;
++    if (modifier / 2u == 2u) result = value.g;
++    if (modifier / 2u == 3u) result = value.b;
++    return (modifier & 1u) == 0u ? result : 1.0 - result;
++}
++vec3 combineColor(uint op, vec3 a, vec3 b, vec3 c) {
++    if (op == 0u) return a;
++    if (op == 1u) return a * b;
++    if (op == 2u) return a + b;
++    if (op == 3u) return a + b - vec3(0.5);
++    if (op == 4u) return mix(b, a, c);
++    if (op == 5u) return a - b;
++    if (op == 6u || op == 7u) return vec3(dot(a - vec3(0.5), b - vec3(0.5)) * 4.0);
++    if (op == 8u) return a * b + c;
++    return min(a + b, vec3(1.0)) * c;
++}
++float combineAlpha(uint op, float a, float b, float c) {
++    if (op == 0u) return a;
++    if (op == 1u) return a * b;
++    if (op == 2u) return a + b;
++    if (op == 3u) return a + b - 0.5;
++    if (op == 4u) return mix(b, a, c);
++    if (op == 5u) return a - b;
++    if (op == 8u) return a * b + c;
++    return min(a + b, 1.0) * c;
++}
++void main() {
++    if (alphatest_func == 0) discard;
++    if (scissor_mode != 0) {
++        bool inside_scissor = gl_FragCoord.x >= float(scissor_x1) &&
++            gl_FragCoord.y >= float(scissor_y1) && gl_FragCoord.x < float(scissor_x2) &&
++            gl_FragCoord.y < float(scissor_y2);
++        if (scissor_mode == 3 ? !inside_scissor : inside_scissor) discard;
++    }
++    float depth = (-2.0 * gl_FragCoord.z + 1.0) * depth_scale + depth_offset;
++    if (pica_misc.x == 0u) depth /= gl_FragCoord.w;
++    vec4 t0 = vec4(0.0), t1 = vec4(0.0), t2 = vec4(0.0);
++    if ((pica_control.y & 1u) != 0u && pica_texture.x != 5u)
++        t0 = sampleGenericTexture(tex0, texcoord0, 0, pica_texture.x == 3u);
++    if ((pica_control.y & 2u) != 0u) t1 = sampleGenericTexture(tex1, texcoord1, 1, false);
++    if ((pica_control.y & 4u) != 0u)
++        t2 = sampleGenericTexture(tex2, pica_texture.y != 0u ? texcoord1 : texcoord2, 2, false);
++    vec4 primary = byteround(primary_color);
++    vec4 previous = vec4(0.0), buffer_color = vec4(0.0);
++    vec4 next_buffer = tev_combiner_buffer_color;
++    // A uniform bound avoids six copies of the interpreter in the driver compiler.
++    for (uint stage = 0u; stage < pica_control.w; ++stage) {
++        uvec4 config = pica_tev[stage];
++        if ((pica_control.x & (1u << stage)) != 0u) {
++            vec3 rgb[3];
++            float alpha[3];
++            for (int operand = 0; operand < 3; ++operand) {
++                uint shift = uint(operand * 4);
++                rgb[operand] = modifyColor(selectSource((config.x >> shift) & 15u,
++                    primary, previous, buffer_color, const_color[stage], t0, t1, t2),
++                    (config.y >> shift) & 15u);
++                alpha[operand] = modifyAlpha(selectSource((config.x >> (16u + shift)) & 15u,
++                    primary, previous, buffer_color, const_color[stage], t0, t1, t2),
++                    (config.y >> (12u + shift)) & 7u);
++            }
++            uint color_op = config.z & 15u;
++            vec3 color_output = byteround(clamp(combineColor(color_op, rgb[0], rgb[1], rgb[2]), 0.0, 1.0));
++            float alpha_output = color_op == 7u ? color_output.r :
++                byteround(clamp(combineAlpha((config.z >> 16u) & 15u, alpha[0], alpha[1], alpha[2]), 0.0, 1.0));
++            uint color_scale = config.w & 3u, alpha_scale = (config.w >> 16u) & 3u;
++            previous = vec4(clamp(color_output * float(1u << (color_scale < 3u ? color_scale : 0u)), 0.0, 1.0),
++                clamp(alpha_output * float(1u << (alpha_scale < 3u ? alpha_scale : 0u)), 0.0, 1.0));
++        }
++        buffer_color = next_buffer;
++        if (stage < 4u) {
++            if ((pica_texture.z & (1u << stage)) != 0u) next_buffer.rgb = previous.rgb;
++            if ((pica_texture.z & (16u << stage)) != 0u) next_buffer.a = previous.a;
++        }
++    }
++    int alpha_value = int(previous.a * 255.0);
++    if ((alphatest_func == 2 && alpha_value != alphatest_ref) ||
++        (alphatest_func == 3 && alpha_value == alphatest_ref) ||
++        (alphatest_func == 4 && alpha_value >= alphatest_ref) ||
++        (alphatest_func == 5 && alpha_value > alphatest_ref) ||
++        (alphatest_func == 6 && alpha_value <= alphatest_ref) ||
++        (alphatest_func == 7 && alpha_value < alphatest_ref)) discard;
++    if (pica_misc.y == 5u) {
++        float fog_index = (pica_misc.z != 0u ? 1.0 - depth : depth) * 128.0;
++        float fog_i = clamp(floor(fog_index), 0.0, 127.0);
++        int index = int(fog_i) + fog_lut_offset;
++        vec2 entry = texelFetch(texture_buffer_lut_lf, ivec2(index & 2047, index >> 11), 0).rg;
++        float factor = clamp(entry.r + entry.g * (fog_index - fog_i), 0.0, 1.0);
++        previous.rgb = mix(fog_color, previous.rgb, factor);
++    }
++    gl_FragDepth = depth;
++    color = byteround(previous);
++    if (pica_misc.w == 0u) color = vec4(0.0);
++    if (pica_misc.w == 4u) color = vec4(1.0);
++}
++)";
++    return source;
++}
++} // namespace Pica::Shader::Generator::GLSL
+diff --git a/src/video_core/shader/generator/glsl_webgl_generic.h b/src/video_core/shader/generator/glsl_webgl_generic.h
+new file mode 100644
+--- /dev/null
++++ b/src/video_core/shader/generator/glsl_webgl_generic.h
+@@ -0,0 +1,24 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++#pragma once
++#include <array>
++#include <optional>
++#include "video_core/shader/generator/pica_fs_config.h"
++
++namespace Pica::Shader::Generator::GLSL {
++struct alignas(16) WebGLFSConfigData {
++    std::array<std::array<u32, 4>, 6> tev{};
++    std::array<u32, 4> texture{};
++    std::array<u32, 4> misc{};
++    std::array<u32, 4> control{};
++    bool operator==(const WebGLFSConfigData&) const = default;
++};
++static_assert(sizeof(WebGLFSConfigData) == 144);
++
++// Unsupported effects retain the specialized renderer instead of dropping draws.
++std::optional<WebGLFSConfigData> MakeWebGLGenericConfig(const FSConfig& config,
++                                                       const UserConfig& user,
++                                                       const Profile& profile);
++std::string GenerateWebGLGenericFragmentShader();
++} // namespace Pica::Shader::Generator::GLSL
+diff --git a/src/video_core/shader/generator/pica_fs_config.cpp b/src/video_core/shader/generator/pica_fs_config.cpp
+--- a/src/video_core/shader/generator/pica_fs_config.cpp
++++ b/src/video_core/shader/generator/pica_fs_config.cpp
+@@ -87,7 +87,17 @@
+         const u32 alphas = TevOperandCount(tev_stage.alpha_op);
+         const u32 color_mask = (1U << (colors * 4)) - 1;
+         const u32 alpha_mask = (1U << (alphas * 4)) - 1;
+-        tev_stages[i].sources_raw &= color_mask | (alpha_mask << 16);
++        u32 source_mask = color_mask | (alpha_mask << 16);
++        // On the first stage Previous reads source3, even for a one/two-operand operation.
++        if (i == 0) {
++            for (u32 channel = 0; channel < 2; ++channel) {
++                for (u32 operand = 0; operand < (channel ? alphas : colors); ++operand) {
++                    if (((tev_stages[i].sources_raw >> (channel * 16 + operand * 4)) & 15) == 15)
++                        source_mask |= 15U << (channel * 16 + 8);
++                }
++            }
++        }
++        tev_stages[i].sources_raw &= source_mask;
+         tev_stages[i].modifiers_raw &= color_mask | (alpha_mask << 12);
+ #endif
+     }

@@ -1,0 +1,1221 @@
+{
+  "date": "2026-09-23",
+  "timezone": "Asia/Seoul",
+  "scope": [
+    "reuse unchanged vertex, index and uniform buffer uploads",
+    "direct known WebGL entry points",
+    "skip generic configuration/preparation when a specialized program is already ready"
+  ],
+  "image": "romm-custom-dosbox-pure:5.2.0-azahar-submit-20260923-r1",
+  "imageManifest": "sha256:3092be77479e7ec47789b38f1086e138c3e2f54d6a279d548f71d6952788bc57",
+  "core": {
+    "bytes": 3503007,
+    "sha256": "85d9558738c08ebf6f385875a78f91a1b0d4cf03d5a7d8939b9844f85b89e8b2",
+    "wasmBytes": 12738993,
+    "wasmSha256": "89ab3b9a9d8d9764ccf848a43ff2764623c5d8f599093ef5be981b102ef28f4f"
+  },
+  "scene": {
+    "romId": 17,
+    "game": "Mario & Luigi: Dream Team",
+    "rommStateId": 29,
+    "stateBytes": 14354704,
+    "stateCreatedAt": "2026-09-22T18:13:57+00:00",
+    "stateLoad": "normal RomM Load Latest State after boot",
+    "input": "none during measurement"
+  },
+  "method": {
+    "order": [
+      0,
+      3,
+      0,
+      1,
+      2,
+      3
+    ],
+    "warmupSecondsPerPhase": 10,
+    "samplesPerPhase": 15,
+    "visible": true,
+    "cpuProfiler": false,
+    "glTimingHooks": false,
+    "coreBuildDuringMeasurements": false,
+    "modes": {
+      "0": "ordinary uploads and GLAD dispatch",
+      "1": "upload reuse",
+      "2": "direct WebGL calls",
+      "3": "both (default)"
+    },
+    "fps": "core frames per second; the game advances at about half this frame rate",
+    "gpuMs": "CPU wall time spent processing emulated graphics commands, not GPU hardware time"
+  },
+  "pooledModes": {
+    "0": {
+      "freshSamples": 30,
+      "median": {
+        "fps": 19.60801275674242,
+        "gameFps": 9.79886748593053,
+        "coreRunMs": 46.8865,
+        "gpuMs": 30.91488,
+        "emulationSpeed": 0.32755017181838103
+      }
+    },
+    "1": {
+      "freshSamples": 15,
+      "median": {
+        "fps": 20.85308056872038,
+        "gameFps": 10.417113655543524,
+        "coreRunMs": 44.348,
+        "gpuMs": 27.815959272727273,
+        "emulationSpeed": 0.34821664620518267
+      }
+    },
+    "2": {
+      "freshSamples": 15,
+      "median": {
+        "fps": 20,
+        "gameFps": 9.990212468961609,
+        "coreRunMs": 45.918,
+        "gpuMs": 29.8057728,
+        "emulationSpeed": 0.3339468282849673
+      }
+    },
+    "3": {
+      "freshSamples": 30,
+      "median": {
+        "fps": 21.632251720747295,
+        "gameFps": 10.808924591738323,
+        "coreRunMs": 42.635000000000005,
+        "gpuMs": 25.876631272727273,
+        "emulationSpeed": 0.361308447891632
+      }
+    }
+  },
+  "sameSessionFpsGain": 0.10323529411764687,
+  "phases": [
+    {
+      "index": 0,
+      "mode": 0,
+      "freshSamples": 15,
+      "firstAt": 1790102290792,
+      "lastAt": 1790102305327,
+      "allVisible": true,
+      "median": {
+        "fps": 19.66568338249754,
+        "gameFps": 9.825256940687268,
+        "coreRunMs": 46.858,
+        "gpuMs": 30.8496512,
+        "emulationSpeed": 0.32843377638482363
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 156177508,
+          "uploads": 180634,
+          "hitRate": 0.0
+        },
+        "uniform": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 426148864,
+          "uploads": 180634,
+          "hitRate": 0.0
+        },
+        "index": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 17668762,
+          "uploads": 179647,
+          "hitRate": 0.0
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102290587,
+          "fps": 18.587360594795538,
+          "gameFps": 9.285740264562477,
+          "coreRunMs": 49.637,
+          "gpuMs": 31.036633600000002,
+          "emulationSpeed": 0.31039629697158283
+        },
+        {
+          "at": 1790102291624,
+          "fps": 19.305019305019304,
+          "gameFps": 9.648830728447507,
+          "coreRunMs": 47.344,
+          "gpuMs": 31.190387200000004,
+          "emulationSpeed": 0.32253435940903336
+        },
+        {
+          "at": 1790102292723,
+          "fps": 20.018198362147405,
+          "gameFps": 10.000181530568003,
+          "coreRunMs": 46.608,
+          "gpuMs": 30.48406109090909,
+          "emulationSpeed": 0.3342797044519441
+        },
+        {
+          "at": 1790102293726,
+          "fps": 20.95808383233533,
+          "gameFps": 10.973004652873186,
+          "coreRunMs": 44.752,
+          "gpuMs": 29.41647238095238,
+          "emulationSpeed": 0.3501206471886124
+        },
+        {
+          "at": 1790102294727,
+          "fps": 19,
+          "gameFps": 8.992267513196333,
+          "coreRunMs": 48.576,
+          "gpuMs": 32.00210189473684,
+          "emulationSpeed": 0.3172931583439674
+        },
+        {
+          "at": 1790102295741,
+          "fps": 19.723865877712033,
+          "gameFps": 9.861154938466392,
+          "coreRunMs": 46.644,
+          "gpuMs": 30.8496512,
+          "emulationSpeed": 0.3296317844745977
+        },
+        {
+          "at": 1790102296745,
+          "fps": 19.9203187250996,
+          "gameFps": 9.957333542697556,
+          "coreRunMs": 46.998,
+          "gpuMs": 30.796339200000002,
+          "emulationSpeed": 0.33284777126516835
+        },
+        {
+          "at": 1790102297763,
+          "fps": 19.66568338249754,
+          "gameFps": 9.823616262702801,
+          "coreRunMs": 46.915,
+          "gpuMs": 30.834777600000002,
+          "emulationSpeed": 0.32837696789824533
+        },
+        {
+          "at": 1790102298773,
+          "fps": 19.821605550049554,
+          "gameFps": 9.901234786950774,
+          "coreRunMs": 46.745,
+          "gpuMs": 30.8991488,
+          "emulationSpeed": 0.3309725357173183
+        },
+        {
+          "at": 1790102299773,
+          "fps": 21,
+          "gameFps": 10.999231285723903,
+          "coreRunMs": 45.04,
+          "gpuMs": 29.688649142857145,
+          "emulationSpeed": 0.35095747228417695
+        },
+        {
+          "at": 1790102300813,
+          "fps": 18.26923076923077,
+          "gameFps": 8.653720475198021,
+          "coreRunMs": 49.777,
+          "gpuMs": 32.78658021052632,
+          "emulationSpeed": 0.30534652696736214
+        },
+        {
+          "at": 1790102301853,
+          "fps": 19.249278152069298,
+          "gameFps": 9.618299107988168,
+          "coreRunMs": 47.168,
+          "gpuMs": 31.206425599999996,
+          "emulationSpeed": 0.3215147316023637
+        },
+        {
+          "at": 1790102302885,
+          "fps": 19.398642095053347,
+          "gameFps": 9.691658264128174,
+          "coreRunMs": 46.858,
+          "gpuMs": 30.9306112,
+          "emulationSpeed": 0.32396693745831806
+        },
+        {
+          "at": 1790102303894,
+          "fps": 19.821605550049554,
+          "gameFps": 9.90677926770102,
+          "coreRunMs": 46.295,
+          "gpuMs": 30.3779328,
+          "emulationSpeed": 0.3311568826152223
+        },
+        {
+          "at": 1790102304912,
+          "fps": 19.66568338249754,
+          "gameFps": 9.825256940687268,
+          "coreRunMs": 46.622,
+          "gpuMs": 30.724928000000002,
+          "emulationSpeed": 0.32843377638482363
+        }
+      ]
+    },
+    {
+      "index": 1,
+      "mode": 3,
+      "freshSamples": 15,
+      "firstAt": 1790102317071,
+      "lastAt": 1790102331601,
+      "allVisible": true,
+      "median": {
+        "fps": 21.359223300970875,
+        "gameFps": 10.670754799682229,
+        "coreRunMs": 43.297,
+        "gpuMs": 26.46086981818182,
+        "emulationSpeed": 0.3566952009634505
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 181535,
+          "misses": 11303,
+          "reusedBytes": 50535388,
+          "uploadedBytes": 116718352,
+          "uploads": 11907,
+          "hitRate": 0.9413860338729918
+        },
+        "uniform": {
+          "hits": 64976,
+          "misses": 194740,
+          "reusedBytes": 86972992,
+          "uploadedBytes": 313467200,
+          "uploads": 194740,
+          "hitRate": 0.2501809669023087
+        },
+        "index": {
+          "hits": 188005,
+          "misses": 4380,
+          "reusedBytes": 14272736,
+          "uploadedBytes": 4649118,
+          "uploads": 4380,
+          "hitRate": 0.9772331522727863
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102316214,
+          "fps": 21.547502448579824,
+          "gameFps": 10.764944592869327,
+          "coreRunMs": 42.782,
+          "gpuMs": 26.150609454545453,
+          "emulationSpeed": 0.3598437174311495
+        },
+        {
+          "at": 1790102317260,
+          "fps": 21.032504780114724,
+          "gameFps": 10.513793730347233,
+          "coreRunMs": 43.467,
+          "gpuMs": 26.85597090909091,
+          "emulationSpeed": 0.3514484062220371
+        },
+        {
+          "at": 1790102318314,
+          "fps": 18.975332068311197,
+          "gameFps": 9.485054710402613,
+          "coreRunMs": 49.476,
+          "gpuMs": 29.595840000000003,
+          "emulationSpeed": 0.31706261483745435
+        },
+        {
+          "at": 1790102319385,
+          "fps": 16.822429906542055,
+          "gameFps": 8.403989595726417,
+          "coreRunMs": 55.504,
+          "gpuMs": 32.87027200000001,
+          "emulationSpeed": 0.28092016021634697
+        },
+        {
+          "at": 1790102320406,
+          "fps": 19.58863858961802,
+          "gameFps": 9.793838600548531,
+          "coreRunMs": 47.801,
+          "gpuMs": 29.5117568,
+          "emulationSpeed": 0.32738256043597597
+        },
+        {
+          "at": 1790102321422,
+          "fps": 21.67487684729064,
+          "gameFps": 10.829380255124132,
+          "coreRunMs": 42.97,
+          "gpuMs": 26.087819636363637,
+          "emulationSpeed": 0.3619976317444908
+        },
+        {
+          "at": 1790102322453,
+          "fps": 21.359223300970875,
+          "gameFps": 10.670754799682229,
+          "coreRunMs": 42.801,
+          "gpuMs": 25.84889018181818,
+          "emulationSpeed": 0.3566952009634505
+        },
+        {
+          "at": 1790102323544,
+          "fps": 22.01834862385321,
+          "gameFps": 11.003120778469329,
+          "coreRunMs": 42.12,
+          "gpuMs": 25.501717333333335,
+          "emulationSpeed": 0.3678049859688204
+        },
+        {
+          "at": 1790102324581,
+          "fps": 21.215043394406944,
+          "gameFps": 10.601845569276701,
+          "coreRunMs": 43.368,
+          "gpuMs": 26.30117236363636,
+          "emulationSpeed": 0.3543917470607829
+        },
+        {
+          "at": 1790102325596,
+          "fps": 21.696252465483234,
+          "gameFps": 10.840803579966055,
+          "coreRunMs": 43.22,
+          "gpuMs": 26.46086981818182,
+          "emulationSpeed": 0.36237948337791803
+        },
+        {
+          "at": 1790102326652,
+          "fps": 20.85308056872038,
+          "gameFps": 10.419134422868156,
+          "coreRunMs": 43.787,
+          "gpuMs": 26.988706909090908,
+          "emulationSpeed": 0.3482841951293676
+        },
+        {
+          "at": 1790102327680,
+          "fps": 21.40077821011673,
+          "gameFps": 10.691185200998635,
+          "coreRunMs": 43.44,
+          "gpuMs": 26.531828363636365,
+          "emulationSpeed": 0.35737813541749086
+        },
+        {
+          "at": 1790102328719,
+          "fps": 21.19460500963391,
+          "gameFps": 10.595461548476695,
+          "coreRunMs": 43.297,
+          "gpuMs": 26.60736,
+          "emulationSpeed": 0.35417834607603904
+        },
+        {
+          "at": 1790102329727,
+          "fps": 21.825396825396826,
+          "gameFps": 10.907778485183572,
+          "coreRunMs": 42.615,
+          "gpuMs": 25.904372363636362,
+          "emulationSpeed": 0.3646182778891349
+        },
+        {
+          "at": 1790102330757,
+          "fps": 21.359223300970875,
+          "gameFps": 10.675670068719327,
+          "coreRunMs": 42.646,
+          "gpuMs": 25.953466181818182,
+          "emulationSpeed": 0.35685950544892414
+        }
+      ]
+    },
+    {
+      "index": 2,
+      "mode": 0,
+      "freshSamples": 15,
+      "firstAt": 1790102343678,
+      "lastAt": 1790102358289,
+      "allVisible": true,
+      "median": {
+        "fps": 19.474196689386563,
+        "gameFps": 9.731746357991243,
+        "coreRunMs": 46.923,
+        "gpuMs": 30.967820800000002,
+        "emulationSpeed": 0.3253060050324807
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 157280216,
+          "uploads": 181838,
+          "hitRate": 0.0
+        },
+        "uniform": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 429185536,
+          "uploads": 181838,
+          "hitRate": 0.0
+        },
+        "index": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 17793764,
+          "uploads": 180844,
+          "hitRate": 0.0
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102343088,
+          "fps": 18.88667992047714,
+          "gameFps": 8.945078079320467,
+          "coreRunMs": 48.343,
+          "gpuMs": 31.82738863157895,
+          "emulationSpeed": 0.3156270800288227
+        },
+        {
+          "at": 1790102344185,
+          "fps": 20.072992700729927,
+          "gameFps": 10.032421283360756,
+          "coreRunMs": 46.697,
+          "gpuMs": 30.798464000000003,
+          "emulationSpeed": 0.33535739439209394
+        },
+        {
+          "at": 1790102345189,
+          "fps": 19.9203187250996,
+          "gameFps": 9.95183629691057,
+          "coreRunMs": 46.078,
+          "gpuMs": 30.207936,
+          "emulationSpeed": 0.33266301744771865
+        },
+        {
+          "at": 1790102346192,
+          "fps": 19.960079840319363,
+          "gameFps": 9.97481176492819,
+          "coreRunMs": 45.793,
+          "gpuMs": 30.1955712,
+          "emulationSpeed": 0.3334320227909606
+        },
+        {
+          "at": 1790102347208,
+          "fps": 19.68503937007874,
+          "gameFps": 9.840679865332895,
+          "coreRunMs": 46.479,
+          "gpuMs": 30.776012800000004,
+          "emulationSpeed": 0.32894834213042884
+        },
+        {
+          "at": 1790102348243,
+          "fps": 19.32367149758454,
+          "gameFps": 9.659596439679854,
+          "coreRunMs": 46.923,
+          "gpuMs": 31.0087296,
+          "emulationSpeed": 0.3228942280681104
+        },
+        {
+          "at": 1790102349267,
+          "fps": 19.550342130987293,
+          "gameFps": 9.774118709158257,
+          "coreRunMs": 46.438,
+          "gpuMs": 30.267648,
+          "emulationSpeed": 0.32672337573851673
+        },
+        {
+          "at": 1790102350294,
+          "fps": 19.474196689386563,
+          "gameFps": 9.731746357991243,
+          "coreRunMs": 46.601,
+          "gpuMs": 30.865689600000003,
+          "emulationSpeed": 0.3253060050324807
+        },
+        {
+          "at": 1790102351303,
+          "fps": 19.841269841269842,
+          "gameFps": 9.911142877513372,
+          "coreRunMs": 46.731,
+          "gpuMs": 30.967820800000002,
+          "emulationSpeed": 0.3313037374237905
+        },
+        {
+          "at": 1790102352404,
+          "fps": 20,
+          "gameFps": 9.995366220913558,
+          "coreRunMs": 47.199,
+          "gpuMs": 30.961152000000002,
+          "emulationSpeed": 0.33411874134510333
+        },
+        {
+          "at": 1790102353480,
+          "fps": 18.587360594795538,
+          "gameFps": 9.293337583982032,
+          "coreRunMs": 48.048,
+          "gpuMs": 31.3940096,
+          "emulationSpeed": 0.310652112754801
+        },
+        {
+          "at": 1790102354524,
+          "fps": 19.157088122605366,
+          "gameFps": 9.573133223704364,
+          "coreRunMs": 48.573,
+          "gpuMs": 32.2125184,
+          "emulationSpeed": 0.3200039962087329
+        },
+        {
+          "at": 1790102355554,
+          "fps": 19.43634596695821,
+          "gameFps": 9.715529302036375,
+          "coreRunMs": 48.173,
+          "gpuMs": 32.093951999999994,
+          "emulationSpeed": 0.3247648841908907
+        },
+        {
+          "at": 1790102356616,
+          "fps": 18.832391713747647,
+          "gameFps": 9.408927841080711,
+          "coreRunMs": 48.389,
+          "gpuMs": 32.2525824,
+          "emulationSpeed": 0.31451505362215726
+        },
+        {
+          "at": 1790102357666,
+          "fps": 19.065776930409914,
+          "gameFps": 9.525308607806497,
+          "coreRunMs": 47.933,
+          "gpuMs": 31.9769856,
+          "emulationSpeed": 0.3184063009565909
+        }
+      ]
+    },
+    {
+      "index": 3,
+      "mode": 1,
+      "freshSamples": 15,
+      "firstAt": 1790102370218,
+      "lastAt": 1790102384897,
+      "allVisible": true,
+      "median": {
+        "fps": 20.85308056872038,
+        "gameFps": 10.417113655543524,
+        "coreRunMs": 44.348,
+        "gpuMs": 27.815959272727273,
+        "emulationSpeed": 0.34821664620518267
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 183913,
+          "misses": 11465,
+          "reusedBytes": 51168200,
+          "uploadedBytes": 118299916,
+          "uploads": 12077,
+          "hitRate": 0.9413188793006377
+        },
+        "uniform": {
+          "hits": 65801,
+          "misses": 197293,
+          "reusedBytes": 88075216,
+          "uploadedBytes": 317582480,
+          "uploads": 197293,
+          "hitRate": 0.250104525378762
+        },
+        "index": {
+          "hits": 190491,
+          "misses": 4428,
+          "reusedBytes": 14473320,
+          "uploadedBytes": 4699098,
+          "uploads": 4428,
+          "hitRate": 0.9772828713465593
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102369342,
+          "fps": 20.313942751615883,
+          "gameFps": 10.149706023176584,
+          "coreRunMs": 44.982,
+          "gpuMs": 28.33022836363636,
+          "emulationSpeed": 0.3392779140389139
+        },
+        {
+          "at": 1790102370345,
+          "fps": 19.960079840319363,
+          "gameFps": 9.97770103550976,
+          "coreRunMs": 46.46,
+          "gpuMs": 28.744844800000003,
+          "emulationSpeed": 0.33352860359439895
+        },
+        {
+          "at": 1790102371423,
+          "fps": 20.408163265306122,
+          "gameFps": 10.20214220352738,
+          "coreRunMs": 45.53,
+          "gpuMs": 28.446114909090912,
+          "emulationSpeed": 0.3410307173072019
+        },
+        {
+          "at": 1790102372491,
+          "fps": 20.61855670103093,
+          "gameFps": 10.302230736401954,
+          "coreRunMs": 44.509,
+          "gpuMs": 27.749934545454547,
+          "emulationSpeed": 0.34437641309143047
+        },
+        {
+          "at": 1790102373540,
+          "fps": 20.972354623450904,
+          "gameFps": 10.478284057303762,
+          "coreRunMs": 44.248,
+          "gpuMs": 27.956596363636365,
+          "emulationSpeed": 0.3502614114686046
+        },
+        {
+          "at": 1790102374597,
+          "fps": 20.833333333333332,
+          "gameFps": 10.413707911352217,
+          "coreRunMs": 44.133,
+          "gpuMs": 27.442199272727272,
+          "emulationSpeed": 0.34810280115564746
+        },
+        {
+          "at": 1790102375628,
+          "fps": 21.33850630455868,
+          "gameFps": 10.66661718390632,
+          "coreRunMs": 43.656,
+          "gpuMs": 27.182522181818182,
+          "emulationSpeed": 0.3565568913763216
+        },
+        {
+          "at": 1790102376682,
+          "fps": 20.872865275142313,
+          "gameFps": 10.43266848327119,
+          "coreRunMs": 43.939,
+          "gpuMs": 27.48489309090909,
+          "emulationSpeed": 0.34873660308793636
+        },
+        {
+          "at": 1790102377726,
+          "fps": 21.0727969348659,
+          "gameFps": 10.534685793917212,
+          "coreRunMs": 44.756,
+          "gpuMs": 28.137472,
+          "emulationSpeed": 0.35214677282810486
+        },
+        {
+          "at": 1790102378799,
+          "fps": 20.52238805970149,
+          "gameFps": 10.251773415139949,
+          "coreRunMs": 44.348,
+          "gpuMs": 27.815959272727273,
+          "emulationSpeed": 0.3426897578654886
+        },
+        {
+          "at": 1790102379829,
+          "fps": 21.379980563654033,
+          "gameFps": 10.680597832598323,
+          "coreRunMs": 43.732,
+          "gpuMs": 27.435554909090907,
+          "emulationSpeed": 0.35702519856746073
+        },
+        {
+          "at": 1790102380899,
+          "fps": 20.5799812909261,
+          "gameFps": 10.282101993665927,
+          "coreRunMs": 44.857,
+          "gpuMs": 28.219008,
+          "emulationSpeed": 0.34370262755190556
+        },
+        {
+          "at": 1790102381942,
+          "fps": 21.113243761996163,
+          "gameFps": 10.546750931857218,
+          "coreRunMs": 44.367,
+          "gpuMs": 27.881518545454544,
+          "emulationSpeed": 0.352549119785809
+        },
+        {
+          "at": 1790102382998,
+          "fps": 20.85308056872038,
+          "gameFps": 10.417113655543524,
+          "coreRunMs": 43.941,
+          "gpuMs": 27.485661090909094,
+          "emulationSpeed": 0.34821664620518267
+        },
+        {
+          "at": 1790102384045,
+          "fps": 21.012416427889207,
+          "gameFps": 10.503600832979089,
+          "coreRunMs": 43.604,
+          "gpuMs": 26.98712436363636,
+          "emulationSpeed": 0.351107684535204
+        }
+      ]
+    },
+    {
+      "index": 4,
+      "mode": 2,
+      "freshSamples": 15,
+      "firstAt": 1790102396988,
+      "lastAt": 1790102411874,
+      "allVisible": true,
+      "median": {
+        "fps": 20,
+        "gameFps": 9.990212468961609,
+        "coreRunMs": 45.918,
+        "gpuMs": 29.8057728,
+        "emulationSpeed": 0.3339468282849673
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 161714600,
+          "uploads": 187022,
+          "hitRate": 0.0
+        },
+        "uniform": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 441350656,
+          "uploads": 187022,
+          "hitRate": 0.0
+        },
+        "index": {
+          "hits": 0,
+          "misses": 0,
+          "reusedBytes": 0,
+          "uploadedBytes": 18295244,
+          "uploads": 186000,
+          "hitRate": 0.0
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102396599,
+          "fps": 19.821605550049554,
+          "gameFps": 9.906432555739137,
+          "coreRunMs": 45.846,
+          "gpuMs": 29.884672000000002,
+          "emulationSpeed": 0.3311462836137144
+        },
+        {
+          "at": 1790102397703,
+          "fps": 19.92753623188406,
+          "gameFps": 9.962820926010513,
+          "coreRunMs": 45.918,
+          "gpuMs": 29.99872,
+          "emulationSpeed": 0.33303083793772653
+        },
+        {
+          "at": 1790102398704,
+          "fps": 20,
+          "gameFps": 9.991004579045248,
+          "coreRunMs": 45.814,
+          "gpuMs": 29.8057728,
+          "emulationSpeed": 0.3339733064655771
+        },
+        {
+          "at": 1790102399705,
+          "fps": 20.97902097902098,
+          "gameFps": 10.983744760713808,
+          "coreRunMs": 43.982,
+          "gpuMs": 28.600320000000004,
+          "emulationSpeed": 0.3504633366913504
+        },
+        {
+          "at": 1790102400798,
+          "fps": 19.23076923076923,
+          "gameFps": 9.153485647334506,
+          "coreRunMs": 47.958,
+          "gpuMs": 31.20206019047619,
+          "emulationSpeed": 0.32128002343292333
+        },
+        {
+          "at": 1790102401882,
+          "fps": 20.29520295202952,
+          "gameFps": 10.146527965867758,
+          "coreRunMs": 45.65,
+          "gpuMs": 29.723752727272732,
+          "emulationSpeed": 0.3391716799615946
+        },
+        {
+          "at": 1790102402897,
+          "fps": 19.704433497536947,
+          "gameFps": 9.848770785161026,
+          "coreRunMs": 45.976,
+          "gpuMs": 29.914112,
+          "emulationSpeed": 0.3292188005438917
+        },
+        {
+          "at": 1790102403981,
+          "fps": 20.313942751615883,
+          "gameFps": 10.151864210081895,
+          "coreRunMs": 45.619,
+          "gpuMs": 29.511691636363636,
+          "emulationSpeed": 0.339350056537393
+        },
+        {
+          "at": 1790102404989,
+          "fps": 19.841269841269842,
+          "gameFps": 9.919944618457027,
+          "coreRunMs": 45.847,
+          "gpuMs": 29.755430399999998,
+          "emulationSpeed": 0.3315969647445486
+        },
+        {
+          "at": 1790102406002,
+          "fps": 19.76284584980237,
+          "gameFps": 9.871766230510447,
+          "coreRunMs": 46.155,
+          "gpuMs": 29.9374976,
+          "emulationSpeed": 0.3299874784937649
+        },
+        {
+          "at": 1790102407002,
+          "fps": 20,
+          "gameFps": 9.995102559667403,
+          "coreRunMs": 46.386,
+          "gpuMs": 30.315660799999996,
+          "emulationSpeed": 0.334083304526115
+        },
+        {
+          "at": 1790102408019,
+          "fps": 19.68503937007874,
+          "gameFps": 9.837093946796967,
+          "coreRunMs": 46.43,
+          "gpuMs": 29.728550399999996,
+          "emulationSpeed": 0.32885405064142265
+        },
+        {
+          "at": 1790102409020,
+          "fps": 20,
+          "gameFps": 9.990212468961609,
+          "coreRunMs": 45.989,
+          "gpuMs": 29.6726144,
+          "emulationSpeed": 0.3339468282849673
+        },
+        {
+          "at": 1790102410112,
+          "fps": 20.146520146520146,
+          "gameFps": 10.067638127116474,
+          "coreRunMs": 46.781,
+          "gpuMs": 30.63542690909091,
+          "emulationSpeed": 0.3365346006344413
+        },
+        {
+          "at": 1790102411178,
+          "fps": 20.657276995305164,
+          "gameFps": 10.321320187379328,
+          "coreRunMs": 45.666,
+          "gpuMs": 29.681117090909094,
+          "emulationSpeed": 0.3450145231108696
+        }
+      ]
+    },
+    {
+      "index": 5,
+      "mode": 3,
+      "freshSamples": 15,
+      "firstAt": 1790102423722,
+      "lastAt": 1790102438392,
+      "allVisible": true,
+      "median": {
+        "fps": 21.76063303659743,
+        "gameFps": 10.87509750414693,
+        "coreRunMs": 42.345,
+        "gpuMs": 25.41513309090909,
+        "emulationSpeed": 0.36352583885203005
+      },
+      "uploadCountersDelta": {
+        "vertex": {
+          "hits": 188689,
+          "misses": 11751,
+          "reusedBytes": 52457688,
+          "uploadedBytes": 121438028,
+          "uploads": 12379,
+          "hitRate": 0.9413739772500499
+        },
+        "uniform": {
+          "hits": 67522,
+          "misses": 202504,
+          "reusedBytes": 90380288,
+          "uploadedBytes": 325940960,
+          "uploads": 202504,
+          "hitRate": 0.250057401879819
+        },
+        "index": {
+          "hits": 195404,
+          "misses": 4565,
+          "reusedBytes": 14826655,
+          "uploadedBytes": 4846819,
+          "uploads": 4565,
+          "hitRate": 0.9771714615765443
+        }
+      },
+      "genericDrawsDelta": 0,
+      "asyncPending": 0,
+      "asyncFailed": 0,
+      "samples": [
+        {
+          "at": 1790102423339,
+          "fps": 21.847070506454816,
+          "gameFps": 10.914433634401304,
+          "coreRunMs": 43.036,
+          "gpuMs": 25.94877672727273,
+          "emulationSpeed": 0.3648407419820903
+        },
+        {
+          "at": 1790102424357,
+          "fps": 21.632251720747295,
+          "gameFps": 10.807940306841749,
+          "coreRunMs": 42.58,
+          "gpuMs": 25.62921890909091,
+          "emulationSpeed": 0.36128095079691075
+        },
+        {
+          "at": 1790102425369,
+          "fps": 21.76063303659743,
+          "gameFps": 10.870260914089807,
+          "coreRunMs": 41.82,
+          "gpuMs": 25.11113309090909,
+          "emulationSpeed": 0.3633641643974305
+        },
+        {
+          "at": 1790102426445,
+          "fps": 22.304832713754646,
+          "gameFps": 11.15128083314282,
+          "coreRunMs": 41.87,
+          "gpuMs": 25.136853333333335,
+          "emulationSpeed": 0.37275851077647887
+        },
+        {
+          "at": 1790102427456,
+          "fps": 21.76063303659743,
+          "gameFps": 10.87509750414693,
+          "coreRunMs": 42.624,
+          "gpuMs": 25.763572363636367,
+          "emulationSpeed": 0.36352583885203005
+        },
+        {
+          "at": 1790102428465,
+          "fps": 21.825396825396826,
+          "gameFps": 10.90334161490368,
+          "coreRunMs": 42.345,
+          "gpuMs": 25.549381818181818,
+          "emulationSpeed": 0.36447987714162244
+        },
+        {
+          "at": 1790102429483,
+          "fps": 21.632251720747295,
+          "gameFps": 10.809908876634898,
+          "coreRunMs": 42.256,
+          "gpuMs": 25.372544,
+          "emulationSpeed": 0.3613359449863533
+        },
+        {
+          "at": 1790102430487,
+          "fps": 21.93419740777667,
+          "gameFps": 10.956555242457492,
+          "coreRunMs": 42.482,
+          "gpuMs": 25.706437818181815,
+          "emulationSpeed": 0.366248756291533
+        },
+        {
+          "at": 1790102431562,
+          "fps": 22.325581395348838,
+          "gameFps": 11.160352902858383,
+          "coreRunMs": 41.391,
+          "gpuMs": 24.55496533333333,
+          "emulationSpeed": 0.37306176663089
+        },
+        {
+          "at": 1790102432643,
+          "fps": 22.22222222222222,
+          "gameFps": 11.101038275669508,
+          "coreRunMs": 42.235,
+          "gpuMs": 25.412917333333336,
+          "emulationSpeed": 0.3710781067868965
+        },
+        {
+          "at": 1790102433665,
+          "fps": 21.52641878669276,
+          "gameFps": 10.76231032973903,
+          "coreRunMs": 41.765,
+          "gpuMs": 25.092119272727274,
+          "emulationSpeed": 0.3597556609595792
+        },
+        {
+          "at": 1790102434679,
+          "fps": 21.71767028627838,
+          "gameFps": 10.848612387521587,
+          "coreRunMs": 42.402,
+          "gpuMs": 25.41513309090909,
+          "emulationSpeed": 0.3626405112276432
+        },
+        {
+          "at": 1790102435705,
+          "fps": 21.44249512670565,
+          "gameFps": 10.71983664060434,
+          "coreRunMs": 42.514,
+          "gpuMs": 25.613346909090907,
+          "emulationSpeed": 0.35833587750789603
+        },
+        {
+          "at": 1790102436706,
+          "fps": 22.977022977022976,
+          "gameFps": 11.986155127824194,
+          "coreRunMs": 40.913,
+          "gpuMs": 24.684032,
+          "emulationSpeed": 0.3839664910572415
+        },
+        {
+          "at": 1790102437742,
+          "fps": 20.28985507246377,
+          "gameFps": 9.659176050337258,
+          "coreRunMs": 44.943,
+          "gpuMs": 27.30461866666667,
+          "emulationSpeed": 0.3390293520259975
+        }
+      ]
+    }
+  ],
+  "crossImageReferenceOnly": [
+    {
+      "label": "async-r2",
+      "coreSha256": "90c3ba8a2fc87c931187224130e8f456e2986e225c433a1f01f5a775229146a4",
+      "freshSamples": 7,
+      "median": {
+        "fps": 17.664376840039253,
+        "coreRunMs": 51.939,
+        "gpuMs": 35.93099377777778,
+        "emulationSpeed": 0.2951089683337481
+      },
+      "captureDirectory": "/tmp/azahar-submit-r2-clean"
+    },
+    {
+      "label": "cache-before-generic",
+      "coreSha256": "63748f263fb80176395cee5c3d4e7968e704f6362910061a9dce29f2839ba457",
+      "freshSamples": 15,
+      "median": {
+        "fps": 19.76284584980237,
+        "coreRunMs": 46.743,
+        "gpuMs": 31.105472000000002,
+        "emulationSpeed": 0.33011136435860183
+      },
+      "captureDirectory": "/tmp/azahar-submit-pre-generic"
+    }
+  ],
+  "shaderAfterRestore": {
+    "fragmentLookups": 1973804,
+    "fragmentConfigMisses": 18,
+    "fragmentSourceMisses": 16,
+    "fragmentSourceHits": 2,
+    "programLookups": 1973804,
+    "programMisses": 18,
+    "programCount": 30,
+    "preloadedShaders": 17,
+    "preloadedPrograms": 12,
+    "preloadMs": 108.4150390625,
+    "diskPrograms": 30,
+    "diskBytes": 404080,
+    "persistWrites": 18,
+    "parallelCompile": true,
+    "genericInitMs": 5.35986328125,
+    "genericPrograms": 10,
+    "genericDraws": 152,
+    "asyncQueued": 17,
+    "asyncCompleted": 17,
+    "asyncFailed": 0,
+    "asyncPending": 0,
+    "asyncPeakPending": 3,
+    "deferredDraws": 0,
+    "synchronousMisses": 1
+  },
+  "comparisonConsoleEvents": [],
+  "browserStatus": {
+    "at": 1790102438787,
+    "path": "/rom/17/ejs",
+    "started": true,
+    "paused": false,
+    "visibility": "visible",
+    "options": [
+      "citra_cpu_scale|100",
+      "citra_graphics_api|Auto",
+      "citra_use_hw_shaders|enabled",
+      "citra_use_webgl_hw_draw|enabled",
+      "citra_use_hw_shader_cache|enabled",
+      "citra_resolution_factor|1",
+      "citra_layout_option|default",
+      "citra_swap_screen|Top",
+      "citra_swap_screen_mode|Toggle"
+    ],
+    "layout": {
+      "width": 400,
+      "height": 480,
+      "bottomScreenEnabled": true,
+      "bottom": {
+        "left": 40,
+        "top": 240,
+        "right": 360,
+        "bottom": 480
+      }
+    },
+    "nativeGlMethods": {
+      "drawElements": true,
+      "drawArrays": true,
+      "useProgram": true,
+      "bufferSubData": true,
+      "getProgramParameter": true,
+      "getShaderParameter": true
+    },
+    "canvases": [
+      {
+        "width": 1308,
+        "height": 883,
+        "css": {
+          "display": "block",
+          "visibility": "visible"
+        }
+      }
+    ]
+  },
+  "validation": {
+    "nativeSanitizers": "ASan/UBSan passed; leak detection disabled for terminal debugger",
+    "wasmStreamTests": "passed alignment, wrap, grow, reuse, bucket collision and mixed cached/uncached writes",
+    "realWebGL2": {
+      "passed": true,
+      "draws": 2048,
+      "modes": 4,
+      "logs": [
+        "PASS: mode 0, 512 real WebGL2 draws",
+        "PASS: mode 1, 512 real WebGL2 draws",
+        "PASS: mode 2, 512 real WebGL2 draws",
+        "PASS: mode 3, 512 real WebGL2 draws"
+      ]
+    },
+    "runtimeTest": "node --test custom-emulatorjs/tests/azahar-runtime.test.cjs passed",
+    "fullCoreBuild": "passed",
+    "archiveExtraction": "passed",
+    "wasmValidate": "passed",
+    "javascriptSyntax": "passed",
+    "patchReverseCheck": "passed",
+    "servedHttp": "HTTP 200, exact core bytes and SHA-256 verified"
+  },
+  "limitations": [
+    "Single saved stationary plaza on one browser/device; NPC animation continues and timings are not cycle-synchronized.",
+    "Some screenshots show a black lower screen, including the pre-generic core and multiple candidate modes. Final mode 3 shows both screens. This capture/display symptom is not fixed or causally attributed here.",
+    "Cross-image runs differed in preload cache and lower-screen capture, so their FPS values are reference observations, not an isolated causal comparison of the generic shader layer.",
+    "Generic fallback is preserved, but first-use vertex compilation and generic program linking remain synchronous.",
+    "The measured game still runs at about 36 percent of full speed; no ARM interpreter or async vertex shader changes were made."
+  ],
+  "temporaryEvidenceDirectory": "/tmp/azahar-submit-candidate-r1"
+}

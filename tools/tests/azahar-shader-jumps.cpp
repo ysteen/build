@@ -73,7 +73,9 @@ static std::string Quote(std::string_view value) {
     return out + '"';
 }
 
-int main() {
+int main(int argc, char** argv) {
+    const u32 stress_blocks = argc > 1 ? static_cast<u32>(std::stoul(argv[1])) : 48;
+    Check(stress_blocks > 0 && stress_blocks <= 64, "stress block count must be 1-64");
     const auto temporary = DestRegister::MakeTemporary(0);
     const auto temp_source = SourceRegister::MakeTemporary(0);
     const u32 move = Arithmetic(OpCode::Id::MOV, temporary, SourceRegister::MakeInput(0));
@@ -82,7 +84,7 @@ int main() {
                                      SourceRegister::MakeInput(2));
     const u32 output = Arithmetic(OpCode::Id::MOV, DestRegister::MakeOutput(0), temp_source);
     const u32 end = Flow(OpCode::Id::END);
-    const std::vector<std::pair<std::string, std::vector<u32>>> programs{
+    std::vector<std::pair<std::string, std::vector<u32>>> programs{
         {"forward-jump", {move, Flow(OpCode::Id::JMPU, 3), add, output, end}},
         {"backward-jump", {move, add,
             Arithmetic(OpCode::Id::CMP, temporary, temp_source, SourceRegister::MakeInput(2)),
@@ -94,7 +96,23 @@ int main() {
         {"jump-in-loop", {move, Flow(OpCode::Id::LOOP, 5), Flow(OpCode::Id::JMPU, 4),
             add, add, Flow(OpCode::Id::NOP), output, end}},
         {"inverted-uniform-jump", {move, Flow(OpCode::Id::JMPU, 3, 1), add, output, end}},
+        {"jump-to-empty-last-block", {move, Flow(OpCode::Id::CALL, 4, 3), output, end,
+            Flow(OpCode::Id::JMPU, 6), add, Flow(OpCode::Id::NOP)}},
     };
+
+    // Many non-empty fall-through cases caused ANGLE to duplicate the remaining
+    // blocks under every case. Exercise both branch outcomes against the CPU
+    // interpreter and provide a representative compile-time stress fixture.
+    std::vector<u32> chained{move};
+    for (u32 block = 0; block < stress_blocks; ++block) {
+        const u32 offset = static_cast<u32>(chained.size());
+        chained.push_back(Flow(OpCode::Id::JMPU, offset + 3, 0, block % 4));
+        chained.push_back(add);
+        chained.push_back(add_three);
+    }
+    chained.push_back(output);
+    chained.push_back(end);
+    programs.emplace_back("chained-forward-jumps", std::move(chained));
 
     std::puts("[");
     bool first = true;
@@ -134,15 +152,14 @@ void main() { result0 = vec4(0.0); exec_shader(); gl_Position = vec4(0.0, 0.0, 0
         first = false;
         std::printf("{\"name\":%s,\"source\":%s,\"cases\":[", Quote(name).c_str(),
                     Quote(source).c_str());
-        for (u32 mask = 0; mask < 4; ++mask) {
+        for (u32 mask = 0; mask < 16; ++mask) {
             ShaderUnit state{};
             for (u32 lane = 0; lane < 4; ++lane) {
                 state.input[0][lane] = f24::FromFloat32(static_cast<float>(lane));
                 state.input[1][lane] = f24::FromFloat32(1.0f);
                 state.input[2][lane] = f24::FromFloat32(3.0f);
             }
-            setup.uniforms.b[0] = mask & 1;
-            setup.uniforms.b[1] = mask & 2;
+            for (u32 bit = 0; bit < 4; ++bit) setup.uniforms.b[bit] = mask & (1u << bit);
             setup.uniforms.i[0] = {2, 0, 1, 0};
             DebugData<false> debug;
             RunInterpreter<false, false>(setup, state, debug, 0);

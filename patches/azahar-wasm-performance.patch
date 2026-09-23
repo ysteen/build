@@ -2763,7 +2763,7 @@ index ac8c41a..458a32f 100644
  
  void RasterizerOpenGL::UploadUniforms(bool accelerate_draw) {
 diff --git a/src/video_core/renderer_opengl/gl_shader_manager.cpp b/src/video_core/renderer_opengl/gl_shader_manager.cpp
-index 786fb3f..e1f089e 100644
+index 786fb3f..c017ccc 100644
 --- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
 +++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
 @@ -9,6 +9,9 @@
@@ -2776,7 +2776,21 @@ index 786fb3f..e1f089e 100644
  #include "common/hash.h"
  #include "common/settings.h"
  #include "core/frontend/emu_window.h"
-@@ -251,14 +254,104 @@ private:
+@@ -74,6 +77,13 @@ static std::set<GLenum> GetSupportedFormats() {
+     GLint num_formats{};
+     glGetIntegerv(GL_NUM_PROGRAM_BINARY_FORMATS, &num_formats);
+
++    // WebGL exposes no program binary formats. An empty vector has a null
++    // data pointer, which Emscripten rejects with GL_INVALID_VALUE. That error
++    // otherwise remains pending until the first save-state GPU readback.
++    if (num_formats <= 0) {
++        return supported_formats;
++    }
++
+     std::vector<GLint> formats(num_formats);
+     glGetIntegerv(GL_PROGRAM_BINARY_FORMATS, formats.data());
+
+@@ -251,14 +261,104 @@ private:
      std::unordered_map<u64, OGLShaderStage> shader_cache;
  };
  
@@ -2883,7 +2897,7 @@ index 786fb3f..e1f089e 100644
  class ShaderProgramManager::Impl {
  public:
      explicit Impl(const Driver& driver, u64 title_id, bool separable)
-@@ -324,10 +417,33 @@ public:
+@@ -324,10 +424,33 @@ public:
  
      FixedGeometryShaders fixed_geometry_shaders;
  
@@ -2918,7 +2932,7 @@ index 786fb3f..e1f089e 100644
  
      Pica::Shader::Generator::ExtraVSConfig CalcExtraConfig(
          const Pica::Shader::Generator::PicaVSConfig& config, bool accurate_mul) {
-@@ -409,11 +525,15 @@ void ShaderProgramManager::UseTrivialGeometryShader() {
+@@ -409,11 +532,15 @@ void ShaderProgramManager::UseTrivialGeometryShader() {
  void ShaderProgramManager::UseFragmentShader(const Pica::RegsInternal& regs,
                                               const Pica::Shader::UserConfig& user) {
      const FSConfig fs_config{regs};
@@ -2936,7 +2950,7 @@ index 786fb3f..e1f089e 100644
          auto& disk_cache = impl->disk_cache;
          u64 unique_identifier = GetUniqueIdentifier(regs, {});
          ShaderDiskCacheRaw raw{unique_identifier, ProgramType::FS, regs, {}};
-@@ -436,13 +556,25 @@ void ShaderProgramManager::ApplyTo(OpenGLState& state, bool accurate_mul) {
+@@ -436,13 +563,25 @@ void ShaderProgramManager::ApplyTo(OpenGLState& state, bool accurate_mul) {
          state.draw.shader_program = 0;
          state.draw.program_pipeline = impl->pipeline.handle;
      } else {
@@ -2962,7 +2976,7 @@ index 786fb3f..e1f089e 100644
          }
          state.draw.shader_program = cached_program.handle;
      }
-@@ -537,7 +669,8 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
+@@ -537,7 +676,8 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
                      // TODO: Support UserConfig in disk shader cache
                      const FSConfig conf(raw.GetRawShaderConfig());
                      std::scoped_lock lock(mutex);
@@ -2972,7 +2986,7 @@ index 786fb3f..e1f089e 100644
                  } else {
                      // Unsupported shader type got stored somehow so nuke the cache
  
-@@ -653,7 +786,7 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
+@@ -653,7 +793,7 @@ void ShaderProgramManager::LoadDiskCache(const std::atomic_bool& stop_loading,
                  stage.Create(code.c_str(), GL_FRAGMENT_SHADER);
                  handle = stage.GetHandle();
                  std::scoped_lock lock(mutex);
@@ -3269,7 +3283,7 @@ index 4007d02..b1d37f0 100644
      out += "vec2 fma(vec2 a, vec2 b, vec2 c) { return a * b + c; }\n";
      out += "vec3 fma(vec3 a, vec3 b, vec3 c) { return a * b + c; }\n";
 diff --git a/src/video_core/shader/generator/glsl_shader_decompiler.cpp b/src/video_core/shader/generator/glsl_shader_decompiler.cpp
-index eca3513..26975c1 100644
+index eca3513..078a515 100644
 --- a/src/video_core/shader/generator/glsl_shader_decompiler.cpp
 +++ b/src/video_core/shader/generator/glsl_shader_decompiler.cpp
 @@ -24,6 +24,16 @@ using nihstro::SwizzlePattern;
@@ -3352,7 +3366,7 @@ index eca3513..26975c1 100644
                      ++shader.scope;
  
                      auto next_it = labels.lower_bound(label + 1);
-@@ -892,7 +925,8 @@ private:
+@@ -892,9 +925,22 @@ private:
                      u32 compile_end = CompileRange(label, next_label);
                      if (compile_end > next_label && compile_end != PROGRAM_END) {
                          // This happens only when there is a label inside a IF/LOOP block
@@ -3361,7 +3375,21 @@ index eca3513..26975c1 100644
 +                                       JUMP_TARGET_SUFFIX);
                          labels.emplace(compile_end);
                      }
++#if defined(__EMSCRIPTEN__)
++                    else if (compile_end != PROGRAM_END) {
++                        // ANGLE removes non-empty switch fall-through by cloning all following
++                        // cases. Explicit dispatch keeps shader size linear in the label count.
++                        if (next_it == labels.end()) {
++                            shader.AddLine("return false;");
++                        } else {
++                            shader.AddLine("{{ jmp_to = {}{}; break; }}", next_label,
++                                           JUMP_TARGET_SUFFIX);
++                        }
++                    }
++#endif
  
+                     --shader.scope;
+                     shader.AddLine("}}");
 diff --git a/src/video_core/shader/generator/pica_fs_config.cpp b/src/video_core/shader/generator/pica_fs_config.cpp
 index 0f3854c..d11ab67 100644
 --- a/src/video_core/shader/generator/pica_fs_config.cpp

@@ -2,6 +2,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
+#if defined(__wasm__)
+#include <emscripten.h>
+#endif
+#include "common/hash.h"
 #include "common/logging/log.h"
 #include "video_core/renderer_opengl/gl_driver.h"
 #include "video_core/renderer_opengl/gl_stream_buffer.h"
@@ -112,10 +116,59 @@ static void CheckStream(GLenum target, GLenum expected_target) {
     Check(allocations == 4 && uploads == 6 && storage[0] == 0x66, "final upload");
 }
 
+static void CheckReuse(GLenum target) {
+    allocations = uploads = 0;
+    OpenGL::Driver driver;
+    OpenGL::OGLStreamBuffer buffer{driver, target, 64};
+    const std::vector<u8> first(16, 0x31), second(16, 0x72), third(16, 0x19);
+    const auto a = buffer.UploadCached(first, 16);
+    Check(a == 0 && uploads == 1, "first cached upload");
+    Check(buffer.UploadCached(first, 16) == a && uploads == 1, "identical bytes reuse GPU range");
+    const auto b = buffer.UploadCached(second, 16);
+    Check(b == 16 && uploads == 2, "different bytes upload");
+    Check(buffer.UploadCached(first, 16) == a && uploads == 2, "reuse after intervening upload");
+    const auto c = buffer.UploadCached(third, 32);
+    Check(c == 32 && uploads == 3, "cached alignment");
+    Check(buffer.UploadCached(third, 64) == 0 && allocations == 2 && uploads == 4,
+          "incompatible alignment wraps and reuploads");
+    Check(buffer.UploadCached(first, 16) == 16 && uploads == 5,
+          "orphan invalidates old cache entries");
+    auto [bytes, offset, invalid] = buffer.Map(64);
+    std::fill_n(bytes, 64, 0x44);
+    buffer.Unmap(64);
+    Check(invalid && allocations == 3, "uncached write wraps cached storage");
+    buffer.UploadCached(first, 16);
+    Check(uploads == 7 && allocations == 4 && storage[0] == 0x31,
+          "mixed uncached writes cannot create stale cache hits");
+    const std::vector<u8> large(96, 0x55);
+    buffer.UploadCached(large, 16);
+    Check(buffer.GetSize() == 96 && uploads == 8 && allocations == 5, "cached growth");
+    buffer.UploadCached(large, 16);
+    Check(uploads == 8 && allocations == 5, "reuse full buffer before wrapping");
+    buffer.UploadCached(first, 16);
+    Check(uploads == 9 && storage[0] == 0x31, "growth invalidates prior entries");
+
+    const auto bucket = Common::ComputeHash64(first.data(), first.size()) % 256;
+    std::vector<u8> collision(16, 0);
+    for (unsigned i = 1;; ++i) {
+        std::memcpy(collision.data(), &i, sizeof(i));
+        if (Common::ComputeHash64(collision.data(), collision.size()) % 256 == bucket) break;
+        Check(i < 100000, "find bucket collision");
+    }
+    buffer.UploadCached(collision, 16);
+    const auto again = buffer.UploadCached(first, 16);
+    Check(uploads == 11 && std::equal(first.begin(), first.end(), storage.begin() + again),
+          "bucket collisions preserve bytes");
+}
+
 int main() {
     CheckStream(GL_ARRAY_BUFFER, GL_ARRAY_BUFFER);
     CheckStream(GL_UNIFORM_BUFFER, GL_UNIFORM_BUFFER);
     CheckStream(GL_ELEMENT_ARRAY_BUFFER, GL_ELEMENT_ARRAY_BUFFER);
     CheckStream(GL_TEXTURE_BUFFER, GL_ARRAY_BUFFER);
+    CheckReuse(GL_ARRAY_BUFFER);
+    CheckReuse(GL_ELEMENT_ARRAY_BUFFER);
+    CheckReuse(GL_UNIFORM_BUFFER);
     std::puts("PASS: WebGL stream alignment, partial upload, wrap, growth and invalidation");
+    std::puts("PASS: upload reuse, collision, alignment, eviction and mixed cached/uncached writes");
 }
