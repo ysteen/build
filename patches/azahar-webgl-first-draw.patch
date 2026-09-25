@@ -1,0 +1,58 @@
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -577,6 +577,11 @@
+         return it->second.handle;
+     }
+ 
++    GLuint FindGenericProgram(GLuint vs) const {
++        const auto it = generic_programs.find(vs);
++        return it == generic_programs.end() ? 0 : it->second.handle;
++    }
++
+     void InitializeGeneric() {
+         if (generic_initialized) return;
+         generic_initialized = true;
+@@ -635,7 +640,7 @@
+             if (const auto it = program_cache.find(key); it != program_cache.end())
+                 return it->second.handle;
+         }
+-        const GLuint generic = generic_config ? PrepareGenericProgram(current.vs) : 0;
++        const GLuint generic = generic_config ? FindGenericProgram(current.vs) : 0;
+         if (generic) {
+             if (current.fs && !pending_programs.contains(key) && !failed_programs.contains(key) &&
+                 pending_programs.size() < MaxPendingPrograms) {
+@@ -697,7 +702,6 @@
+     }
+ 
+     void LoadWebGLCache(const std::atomic_bool& stop_loading, bool accurate_mul) {
+-        InitializeGeneric();
+         if (!Settings::values.use_disk_shader_cache || disk_cache.GetProgramID() == 0) return;
+         const auto start = emscripten_get_now();
+         const std::string version = fmt::format("webgl-1:{}:{}", Common::g_shader_cache_version,
+@@ -718,6 +722,7 @@
+         auto decoded = WebGLCacheData::Decode(bytes, webgl_cache_key);
+         if (!decoded) return;
+         webgl_disk_data = std::move(*decoded);
++        InitializeGeneric();
+ 
+         GLint previous_program = 0;
+         glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
+@@ -880,11 +885,13 @@
+         impl->fragment_shaders.Get(fs_config, user, impl->profile, true, true);
+     impl->generic_config.reset();
+     if (!handle || !impl->program_cache.contains(Impl::ProgramKey(impl->current.vs, handle))) {
+-        impl->InitializeGeneric();
+-        impl->generic_config = impl->parallel_compile
+-            ? GLSL::MakeWebGLGenericConfig(fs_config, user, impl->profile) : std::nullopt;
+-        if (impl->generic_config && impl->current.vs &&
+-            !impl->PrepareGenericProgram(impl->current.vs)) impl->generic_config.reset();
++        // Cold programmable vertex shaders have no ready generic program. Avoid its
++        // startup compile until a trivial vertex shader can use the fallback.
++        if (impl->current.vs == impl->trivial_vertex_shader.Get()) impl->InitializeGeneric();
++        // A newly seen vertex shader has no ready generic program. Linking one here blocks
++        // before the specialized program can be used, so keep its first draw on the exact path.
++        if (impl->parallel_compile && impl->FindGenericProgram(impl->current.vs))
++            impl->generic_config = GLSL::MakeWebGLGenericConfig(fs_config, user, impl->profile);
+         const bool asynchronous = impl->generic_config.has_value();
+         const bool defer = asynchronous && impl->pending_programs.size() >= Impl::MaxPendingPrograms;
+         handle = impl->fragment_shaders.Compile(hash, asynchronous, defer);

@@ -226,6 +226,10 @@ compileProject() {
     fi
 
     if [ "$name" = "azahar" ]; then
+        azaharFirstDrawPatch="$initialPath/patches/azahar-webgl-first-draw.patch"
+        if git apply --reverse --check "$azaharFirstDrawPatch" 2>/dev/null; then
+            git apply --reverse "$azaharFirstDrawPatch"
+        fi
         azaharSubmissionPatch="$initialPath/patches/azahar-webgl-submission.patch"
         if git apply --reverse --check "$azaharSubmissionPatch" 2>/dev/null; then
             git apply --reverse "$azaharSubmissionPatch"
@@ -279,6 +283,12 @@ compileProject() {
             git apply "$azaharSubmissionPatch"
         elif ! git apply --reverse --check "$azaharSubmissionPatch" 2>/dev/null; then
             echo "Unable to apply Azahar WebGL submission patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharFirstDrawPatch" 2>/dev/null; then
+            git apply "$azaharFirstDrawPatch"
+        elif ! git apply --reverse --check "$azaharFirstDrawPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar first-draw shader patch" >&2
             exit 1
         fi
     fi

@@ -1,6 +1,48 @@
 # Azahar WebAssembly performance investigation
 
-Updated: 2026-09-23 (Asia/Seoul).
+Updated: 2026-09-25 (Asia/Seoul).
+
+## Cold first-draw shader path
+
+`patches/azahar-webgl-first-draw.patch` avoids linking a generic fallback program
+for a newly seen programmable vertex shader. The first draw uses the exact
+specialized path, avoiding a generic link that would block before the exact link
+and could slow subsequent draws. A generic fallback is used only when its vertex
+program is already ready. On a cold game with no persistent shader cache, generic
+initialization is deferred until a trivial vertex shader can use it. Cached
+vertex shaders still prepare their generic programs during cache loading.
+
+This does not make first-use vertex compilation asynchronous. A full Azahar Wasm
+build, the shader utility/generic fixture, and the RomM Azahar runtime test pass.
+The 8081 test image serves the rebuilt core (SHA-256
+`60cd07d46fe879cf324ac93ebc169e701b64f3f6e7ececf2324a2c10ed5747b1`).
+
+In a real Chrome run of Mario & Luigi: Dream Team with WebGL hardware draw and
+the hardware shader cache enabled, startup loaded 30 cached programs in 139 ms.
+The same page recorded a 7.444-second browser long task before the one-minute
+steady capture. At the start and end of that capture, the core reported 59.29
+and 57.26 FPS, respectively. Four new programs appeared during the interval:
+three asynchronous completions and one synchronous miss. Generic draws rose by
+six. The long-task count rose by one 50 ms task, with no new longer maximum.
+No JavaScript exception or failed game/core network request was captured.
+These are observations from one run, not a controlled before/after timing
+comparison. The initial long task shows that startup pauses remain possible;
+this capture does not identify its cause.
+
+A second 90-second CDP sample recorded visibility on each one-second probe.
+The game tab was visible for 88 of 89 samples. Seven new programs appeared:
+six were queued asynchronously and one took the synchronous path. When that
+synchronous miss occurred, one core frame reached 647 ms. Later, four async
+programs were pending while the game's frame telemetry stopped updating for
+about 3.1 seconds; the next update reported a 3.237-second frame interval.
+CDP probes still responded, core execution stayed below 31 ms in that update,
+and the browser long-task count did not rise. This is consistent with a
+graphics/browser scheduling delay during asynchronous program compilation,
+but the capture does not prove which GPU or browser operation caused it.
+All 20 queued async programs in that run eventually completed without a
+reported failure, and a later snapshot returned to about 61 core FPS. The
+frame rate was near 60 FPS between these stalls. An earlier 90-second
+sample had a hidden game tab and is excluded from the visible-scene finding.
 
 ## Reused uploads and direct WebGL calls
 
