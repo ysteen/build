@@ -8,6 +8,13 @@
 #include "video_core/shader/generator/glsl_webgl_generic.h"
 #include "video_core/renderer_opengl/gl_webgl_stats.h"
 
+#pragma push_macro("EM_JS")
+#undef EM_JS
+#define EM_JS(ret, name, params, ...) \
+    const std::string name##Source = "function(program, previous) " #__VA_ARGS__;
+#include "video_core/renderer_opengl/gl_webgl_program_bindings.h"
+#pragma pop_macro("EM_JS")
+
 namespace Common::Log {
 void FmtLogMessageImpl(Class, Level, const char*, unsigned int, const char*, fmt::string_view,
                        const fmt::format_args&) { std::abort(); }
@@ -58,26 +65,28 @@ static Pica::RegsInternal Base() {
 }
 
 int main() {
-    std::array<double, 24> stats{};
+    std::array<double, 31> stats{};
     for (u32 i = 0; i < stats.size(); ++i) stats[i] = i + 0.25;
     OpenGL::PublishWebGLStats(stats);
     EM_ASM({
         const values = Object.values(globalThis.__AZAHAR_SHADER_CACHE__);
-        if (values.length !== 24 || values.some((value, i) => i === 13 ? value !== true : value !== i + 0.25))
+        if (values.length !== 31 || values.some((value, i) => i === 13 ? value !== true : value !== i + 0.25))
             throw new Error("Shader telemetry ABI mismatch");
     });
     Pica::Shader::Profile profile{};
     profile.has_minus_one_to_one_range = true;
     profile.has_blend_minmax_factor = true;
     bool first = true;
-    std::printf("{\"generic\":%s,\"fixtures\":[", Quote(GenerateWebGLGenericFragmentShader()).c_str());
-    const auto emit = [&](std::string label, const Pica::RegsInternal& regs) {
-        const Pica::Shader::FSConfig config{regs};
+    std::printf("{\"generic\":%s,\"programBindings\":%s,\"fixtures\":[",
+                Quote(GenerateWebGLGenericFragmentShader()).c_str(),
+                Quote(BindWebGLProgramResourcesSource).c_str());
+    const auto emit = [&](std::string label, const auto& input) {
+        const Pica::Shader::FSConfig config{input};
         const auto generic = MakeWebGLGenericConfig(config, {}, profile);
         assert(generic);
         std::printf("%s{\"label\":%s,\"source\":%s,\"config\":[", first ? "" : ",\n",
                     Quote(label).c_str(), Quote(GenerateFragmentShader(config, {}, profile)).c_str());
-        std::array<u32, 36> words;
+        std::array<u32, sizeof(WebGLFSConfigData) / sizeof(u32)> words;
         std::memcpy(words.data(), &*generic, sizeof(words));
         for (std::size_t i = 0; i < words.size(); ++i)
             std::printf("%s%u", i ? "," : "", words[i]);
@@ -176,6 +185,70 @@ int main() {
         regs.framebuffer.output_merger.logic_op.Assign(static_cast<Pica::FramebufferRegs::LogicOp>(logic));
         emit("logic-" + std::to_string(logic), regs);
     }
+    // Exercise the fallback against the existing specialized lighting generator.
+    const auto lit = [&] {
+        auto regs = Base();
+        regs.texturing.tev_stage0.color_source1.Assign(Stage::Source::PrimaryFragmentColor);
+        regs.texturing.tev_stage0.color_source2.Assign(Stage::Source::SecondaryFragmentColor);
+        regs.texturing.tev_stage0.color_op.Assign(Stage::Operation::Add);
+        regs.texturing.tev_stage0.alpha_source1.Assign(Stage::Source::PrimaryFragmentColor);
+        Pica::Shader::FSConfig config{regs};
+        auto& light = config.lighting;
+        light.enable.Assign(1); light.src_num.Assign(2);
+        light.config.Assign(Pica::LightingRegs::LightingConfig::Config7);
+        light.enable_primary_alpha.Assign(1); light.enable_secondary_alpha.Assign(1);
+        for (u32 i = 0; i < 8; ++i) {
+            light.lights[i].num.Assign((i + 3) % 8);
+            light.lights[i].directional.Assign(i % 2);
+            light.lights[i].two_sided_diffuse.Assign(i % 2);
+        }
+        for (auto* lut : {&light.lut_d0, &light.lut_d1, &light.lut_fr, &light.lut_rr,
+                         &light.lut_rg, &light.lut_rb, &light.lut_sp}) {
+            lut->enable.Assign(1); lut->abs_input.Assign(1);
+            lut->type.Assign(Pica::LightingRegs::LightingLutInput::NH);
+            lut->SetScale(0.5f);
+        }
+        return config;
+    };
+    for (u32 mode : {0, 1, 2, 3, 4, 5, 6, 8}) {
+        for (u32 input = 0; input <= 5; ++input) {
+            auto config = lit(); auto& light = config.lighting;
+            light.config.Assign(static_cast<Pica::LightingRegs::LightingConfig>(mode));
+            light.src_num.Assign(1 + input % 3);
+            light.clamp_highlights.Assign(input % 2);
+            for (auto* lut : {&light.lut_d0, &light.lut_d1, &light.lut_fr, &light.lut_rr,
+                             &light.lut_rg, &light.lut_rb, &light.lut_sp}) {
+                lut->type.Assign(static_cast<Pica::LightingRegs::LightingLutInput>(input));
+                lut->abs_input.Assign(input % 2);
+            }
+            for (auto& slot : light.lights) {
+                slot.dist_atten_enable.Assign(input % 2);
+                slot.spot_atten_enable.Assign(1);
+                slot.geometric_factor_0.Assign(input % 2);
+                slot.geometric_factor_1.Assign((input + 1) % 2);
+            }
+            emit("lighting-mode-" + std::to_string(mode) + "-input-" + std::to_string(input), config);
+        }
+    }
+    for (u32 bump = 0; bump < 3; ++bump) {
+        for (u32 texture = 0; texture < 4; ++texture) {
+            auto config = lit(); auto& light = config.lighting;
+            light.bump_mode.Assign(static_cast<Pica::LightingRegs::LightingBumpMode>(bump));
+            light.bump_selector.Assign(texture); light.bump_renorm.Assign(texture % 2);
+            light.enable_shadow.Assign(1); light.shadow_selector.Assign(texture);
+            light.shadow_primary.Assign(1); light.shadow_secondary.Assign(1);
+            light.shadow_alpha.Assign(1); light.shadow_invert.Assign(texture % 2);
+            for (auto& slot : light.lights) slot.shadow_enable.Assign(1);
+            emit("lighting-bump-" + std::to_string(bump) + "-shadow-" + std::to_string(texture), config);
+        }
+    }
+    for (u32 count : {0, 1, 8}) {
+        auto config = lit(); config.lighting.src_num.Assign(count);
+        for (auto* lut : {&config.lighting.lut_d0, &config.lighting.lut_d1,
+                         &config.lighting.lut_fr, &config.lighting.lut_rr,
+                         &config.lighting.lut_rg, &config.lighting.lut_rb}) lut->enable.Assign(0);
+        emit("lighting-count-" + std::to_string(count) + "-no-luts", config);
+    }
     u32 rejected = 0;
     const auto reject = [&](const Pica::Shader::FSConfig& config, Pica::Shader::UserConfig user = {}) {
         assert(!MakeWebGLGenericConfig(config, user, profile));
@@ -188,7 +261,7 @@ int main() {
         reject(config);
     }
     auto config = Pica::Shader::FSConfig{base};
-    config.lighting.enable.Assign(1); reject(config);
+    config.lighting.enable.Assign(1); config.lighting.src_num.Assign(9); reject(config);
     config = Pica::Shader::FSConfig{base};
     config.proctex.enable.Assign(1); reject(config);
     config = Pica::Shader::FSConfig{base};

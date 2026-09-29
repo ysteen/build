@@ -1,0 +1,455 @@
+--- a/src/video_core/renderer_opengl/gl_rasterizer.cpp
++++ b/src/video_core/renderer_opengl/gl_rasterizer.cpp
+@@ -911,6 +911,11 @@
+     SyncTextureUnits(framebuffer);
+     state.Apply();
+
++    // Select the CPU vertex path before choosing its compatible fragment fallback.
++    if (!accelerate) {
++        curr_shader_manager->UseTrivialVertexShader();
++        curr_shader_manager->UseTrivialGeometryShader();
++    }
+     // Sync and bind the shader
+     curr_shader_manager->UseFragmentShader(regs, user_config);
+
+--- a/src/video_core/renderer_opengl/gl_shader_manager.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_manager.cpp
+@@ -127,9 +127,13 @@
+         }
+     }
+
+-    void Create(const char* source, GLenum type) {
++    void Create(const char* source, GLenum type, bool wait = true) {
+ #if defined(__EMSCRIPTEN__)
+         source_code = source;
++        if (!wait) {
++            std::get<OGLShader>(shader_or_program).handle = LoadShader(source, type, "async stage", false);
++            return;
++        }
+ #endif
+         if (shader_or_program.index() == 0) {
+             std::get<OGLShader>(shader_or_program).Create(source, type);
+@@ -156,10 +160,10 @@
+ #if defined(__EMSCRIPTEN__)
+     std::string_view Source() const { return source_code; }
+     void StoreSource(std::string source) { source_code = std::move(source); }
+-    void CompileStored(bool asynchronous) {
++    void CompileStored(bool asynchronous, GLenum type = GL_FRAGMENT_SHADER) {
+         if (GetHandle()) return;
+         std::get<OGLShader>(shader_or_program).handle =
+-            LoadShader(source_code, GL_FRAGMENT_SHADER, "fragment", !asynchronous);
++            LoadShader(source_code, type, "stored stage", !asynchronous);
+     }
+ #endif
+
+@@ -236,7 +240,7 @@
+     explicit ShaderDoubleCache(bool _separable) : separable{_separable} {}
+     std::tuple<u64, GLuint, std::optional<std::string>> Get(const KeyConfigType& key,
+                                                             const ExtraConfigType& extra,
+-                                                            const Pica::ShaderSetup& setup) {
++                                                            const Pica::ShaderSetup& setup, bool asynchronous = false, bool defer = false) {
+         std::optional<std::string> result{};
+         const size_t key_hash = key.Hash();
+         auto map_it = shader_map.find(key_hash);
+@@ -252,8 +256,15 @@
+             OGLShaderStage& cached_shader = iter->second;
+             if (new_shader) {
+                 result = std::move(program);
++#if defined(__EMSCRIPTEN__)
++                cached_shader.StoreSource(*result);
++#else
+                 cached_shader.Create((*result).c_str(), ShaderType);
++#endif
+             }
++#if defined(__EMSCRIPTEN__)
++            if (!defer) cached_shader.CompileStored(asynchronous, ShaderType);
++#endif
+             shader_map[key_hash] = &cached_shader;
+             return {key_hash, cached_shader.GetHandle(), std::move(result)};
+         }
+@@ -262,6 +273,9 @@
+             return {0, 0, std::nullopt};
+         }
+
++#if defined(__EMSCRIPTEN__)
++        if (!defer) map_it->second->CompileStored(asynchronous, ShaderType);
++#endif
+         return {key_hash, map_it->second->GetHandle(), std::nullopt};
+     }
+
+@@ -282,17 +296,19 @@
+     }
+
+ #if defined(__EMSCRIPTEN__)
+-    GLuint Preload(const std::string& source) {
++    GLuint Preload(const std::string& source, bool asynchronous = false) {
+         const u64 hash = Common::ComputeHash64(source.data(), source.size());
+         if (const auto it = shader_cache.find(hash); it != shader_cache.end()) {
+             return it->second.GetHandle();
+         }
+         OGLShaderStage stage{false};
+-        stage.Create(source.c_str(), ShaderType);
++        stage.Create(source.c_str(), ShaderType, !asynchronous);
+         if (!stage.GetHandle()) return 0;
+-        GLint valid = GL_FALSE;
+-        glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
+-        if (!valid) return 0;
++        if (!asynchronous) {
++            GLint valid = GL_FALSE;
++            glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
++            if (!valid) return 0;
++        }
+         const auto handle = stage.GetHandle();
+         shader_cache.emplace(hash, std::move(stage));
+         return handle;
+@@ -400,17 +416,19 @@
+         return stage.GetHandle();
+     }
+
+-    GLuint Preload(const std::string& source) {
++    GLuint Preload(const std::string& source, bool asynchronous = false) {
+         const u64 hash = Common::ComputeHash64(source.data(), source.size());
+         if (const auto it = shader_cache.find(hash); it != shader_cache.end()) {
+             return it->second.GetHandle();
+         }
+         OGLShaderStage stage{false};
+-        stage.Create(source.c_str(), GL_FRAGMENT_SHADER);
++        stage.Create(source.c_str(), GL_FRAGMENT_SHADER, !asynchronous);
+         if (!stage.GetHandle()) return 0;
+-        GLint valid = GL_FALSE;
+-        glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
+-        if (!valid) return 0;
++        if (!asynchronous) {
++            GLint valid = GL_FALSE;
++            glGetShaderiv(stage.GetHandle(), GL_COMPILE_STATUS, &valid);
++            if (!valid) return 0;
++        }
+         const auto handle = stage.GetHandle();
+         shader_cache.emplace(hash, std::move(stage));
+         return handle;
+@@ -538,18 +556,25 @@
+     u64 persist_writes{};
+     double preload_ms{};
+     bool parallel_compile{};
++    bool async_vertex{true};
+     bool generic_initialized{};
+     OGLShader generic_fragment;
+     OGLBuffer generic_buffer;
+     std::unordered_map<GLuint, OGLProgram> generic_programs;
++    std::unordered_map<GLuint, OGLProgram> pending_vertices;
++    std::set<GLuint> failed_vertices;
++    u64 vertex_queued{}, vertex_completed{}, vertex_failed{}, vertex_fallbacks{};
++    std::size_t preload_cursor{}, preload_total{};
++    std::vector<GLuint> preload_handles;
++    double preload_issue_ms{};
+     std::optional<GLSL::WebGLFSConfigData> generic_config;
+     std::optional<GLSL::WebGLFSConfigData> uploaded_generic_config;
+     struct PendingProgram {
+         OGLProgram program;
+         GLuint vs{}, fs{};
++        bool from_cache{};
+     };
+     static constexpr std::size_t MaxPendingPrograms = 4;
+-    static constexpr GLenum CompletionStatusKHR = 0x91B1;
+     std::unordered_map<u64, PendingProgram> pending_programs;
+     std::set<u64> failed_programs;
+     double last_poll_ms{};
+@@ -564,17 +589,28 @@
+     std::size_t peak_pending{};
+
+     GLuint PrepareGenericProgram(GLuint vs) {
+-        if (!parallel_compile || !generic_fragment.handle) return 0;
+-        auto [it, inserted] = generic_programs.try_emplace(vs);
+-        if (inserted) {
+-            // Once per vertex shader, normally during startup cache loading. Novel vertex
+-            // programs still use the existing synchronous path in this fragment-only change.
+-            it->second.handle = LoadProgram(false, std::array{vs, generic_fragment.handle},
+-                                            "generic fragment", false);
+-            if (it->second.handle && !FinalizeProgram(it->second.handle, "generic fragment"))
+-                it->second.Release();
+-        }
+-        return it->second.handle;
++        if (!parallel_compile || !generic_fragment.handle || !vs) return 0;
++        if (const auto it = generic_programs.find(vs); it != generic_programs.end())
++            return it->second.handle;
++        if (failed_vertices.contains(vs) || pending_vertices.contains(vs)) return 0;
++        if (async_vertex && pending_vertices.size() >= MaxPendingPrograms) return 0;
++        OGLProgram program;
++        program.handle = LoadProgram(false, std::array{vs, generic_fragment.handle},
++                                      "generic vertex", false);
++        if (!program.handle) {
++            failed_vertices.insert(vs);
++            ++vertex_failed;
++            return 0;
++        }
++        if (async_vertex) {
++            pending_vertices.emplace(vs, std::move(program));
++            ++vertex_queued;
++            return 0;
++        }
++        if (!FinalizeProgram(program.handle, "generic vertex")) return 0;
++        const auto handle = program.handle;
++        generic_programs.emplace(vs, std::move(program));
++        return handle;
+     }
+
+     GLuint FindGenericProgram(GLuint vs) const {
+@@ -588,10 +624,12 @@
+         parallel_compile = !separable && emscripten_webgl_enable_extension(
+             emscripten_webgl_get_current_context(), "KHR_parallel_shader_compile");
+         if (!parallel_compile) return;
++        async_vertex = EM_ASM_INT({ return globalThis.__AZAHAR_ASYNC_VERTEX__ !== false; });
+         const double start = emscripten_get_now();
+         generic_fragment.handle = LoadShader(GLSL::GenerateWebGLGenericFragmentShader(),
+                                               GL_FRAGMENT_SHADER, "generic fragment", false);
+-        if (!PrepareGenericProgram(trivial_vertex_shader.Get())) {
++        const auto trivial_generic = PrepareGenericProgram(trivial_vertex_shader.Get());
++        if (!async_vertex && !trivial_generic) {
+             parallel_compile = false;
+             generic_fragment.Release();
+             return;
+@@ -611,15 +649,28 @@
+         last_poll_ms = now;
+         if (emscripten_is_webgl_context_lost(emscripten_webgl_get_current_context())) return;
+         bool changed = false;
++        for (auto it = pending_vertices.begin(); it != pending_vertices.end();) {
++            const auto status = PollProgram(it->second.handle, "async vertex");
++            if (status == ProgramStatus::Pending) { ++it; continue; }
++            if (status == ProgramStatus::Ready) {
++                generic_programs.emplace(it->first, std::move(it->second));
++                ++vertex_completed;
++            } else {
++                failed_vertices.insert(it->first);
++                ++vertex_failed;
++            }
++            it = pending_vertices.erase(it);
++            changed = true;
++        }
+         for (auto it = pending_programs.begin(); it != pending_programs.end();) {
+-            GLint completed = GL_FALSE;
+-            glGetProgramiv(it->second.program.handle, CompletionStatusKHR, &completed);
+-            if (!completed) { ++it; continue; }
+             auto& pending = it->second;
+-            if (FinalizeProgram(pending.program.handle, "async fragment")) {
++            const auto status = PollProgram(pending.program.handle, "async fragment");
++            if (status == ProgramStatus::Pending) { ++it; continue; }
++            if (status == ProgramStatus::Ready) {
+                 program_cache.emplace(it->first, std::move(pending.program));
+                 RecordWebGLProgram(pending.vs, pending.fs);
+                 ++async_completed;
++                if (pending.from_cache) ++preloaded_programs;
+             } else {
+                 failed_programs.insert(it->first);
+                 ++async_failed;
+@@ -627,12 +678,47 @@
+             it = pending_programs.erase(it);
+             changed = true;
+         }
++        WarmCacheSlice();
+         if (changed || now - last_stats_ms >= 1000.0) {
+             last_stats_ms = now;
+             PublishCacheStats();
+         }
+     }
+
++    void WarmCacheSlice() {
++        if (!async_vertex || preload_cursor >= preload_total || pending_programs.size() >= 2)
++            return;
++        const auto start = emscripten_get_now();
++        const auto pair = webgl_disk_data.programs[preload_cursor++];
++        const auto preload = [&](u32 index) {
++            if (preload_handles[index]) return preload_handles[index];
++            const auto& shader = webgl_disk_data.shaders[index];
++            const auto handle = shader.type == 1 ? fragment_shaders.Preload(shader.source, true)
++                : shader.source == trivial_vertex_shader.Source() ? trivial_vertex_shader.Get()
++                : programmable_vertex_shaders.Preload(shader.source, true);
++            preload_handles[index] = handle;
++            if (handle) ++preloaded_shaders;
++            return handle;
++        };
++        const auto vs = preload(pair.vs), fs = preload(pair.fs);
++        const auto key = ProgramKey(vs, fs);
++        if (vs && fs && !program_cache.contains(key) && !pending_programs.contains(key) &&
++            !failed_programs.contains(key)) {
++            PendingProgram pending;
++            pending.vs = vs;
++            pending.fs = fs;
++            pending.from_cache = true;
++            pending.program.handle = LoadProgram(false, std::array{vs, fs}, "cache warmup", false);
++            if (pending.program.handle) {
++                pending_programs.emplace(key, std::move(pending));
++                ++async_queued;
++                peak_pending = std::max(peak_pending, pending_programs.size());
++            }
++        }
++        PrepareGenericProgram(vs);
++        preload_issue_ms += emscripten_get_now() - start;
++    }
++
+     GLuint GetWebGLProgram(OpenGLState& state) {
+         ++program_lookups;
+         const auto key = ProgramKey(current.vs, current.fs);
+@@ -702,6 +788,8 @@
+     }
+
+     void LoadWebGLCache(const std::atomic_bool& stop_loading, bool accurate_mul) {
++        // Diagnose first-use draws without clearing or replacing the user's cache.
++        if (EM_ASM_INT({ return globalThis.__AZAHAR_SKIP_SHADER_CACHE__ === true; })) return;
+         if (!Settings::values.use_disk_shader_cache || disk_cache.GetProgramID() == 0) return;
+         const auto start = emscripten_get_now();
+         const std::string version = fmt::format("webgl-1:{}:{}", Common::g_shader_cache_version,
+@@ -723,6 +811,15 @@
+         if (!decoded) return;
+         webgl_disk_data = std::move(*decoded);
+         InitializeGeneric();
++        if (parallel_compile && async_vertex) {
++            if (!stop_loading) {
++                preload_total = webgl_disk_data.programs.size();
++                preload_handles.resize(webgl_disk_data.shaders.size());
++            }
++            preload_ms = emscripten_get_now() - start;
++            PublishCacheStats();
++            return;
++        }
+
+         GLint previous_program = 0;
+         glGetIntegerv(GL_CURRENT_PROGRAM, &previous_program);
+@@ -788,7 +885,11 @@
+                static_cast<double>(generic_draws), static_cast<double>(async_queued),
+                static_cast<double>(async_completed), static_cast<double>(async_failed),
+                static_cast<double>(pending_programs.size()), static_cast<double>(peak_pending),
+-               static_cast<double>(deferred_draws), static_cast<double>(synchronous_misses)});
++               static_cast<double>(deferred_draws), static_cast<double>(synchronous_misses),
++               static_cast<double>(vertex_queued), static_cast<double>(vertex_completed),
++               static_cast<double>(vertex_failed), static_cast<double>(pending_vertices.size()),
++               static_cast<double>(vertex_fallbacks), static_cast<double>(preload_total - preload_cursor),
++               preload_issue_ms});
+ #endif
+     }
+
+@@ -831,7 +932,20 @@
+     PicaVSConfig config{regs, setup};
+     ExtraVSConfig extra = impl->CalcExtraConfig(config, accurate_mul);
+
++#if defined(__EMSCRIPTEN__)
++    impl->InitializeGeneric();
++    impl->PollPendingPrograms();
++    const bool asynchronous = impl->parallel_compile && impl->async_vertex;
++    const bool defer = asynchronous && impl->pending_vertices.size() >= Impl::MaxPendingPrograms;
++    auto [hash, handle, result] =
++        impl->programmable_vertex_shaders.Get(config, extra, setup, asynchronous, defer);
++    if (asynchronous && (!handle || !impl->PrepareGenericProgram(handle))) {
++        ++impl->vertex_fallbacks;
++        return false;
++    }
++#else
+     auto [hash, handle, result] = impl->programmable_vertex_shaders.Get(config, extra, setup);
++#endif
+     if (handle == 0)
+         return false;
+     impl->current.vs = handle;
+--- a/src/video_core/renderer_opengl/gl_shader_util.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_util.cpp
+@@ -75,9 +75,18 @@
+     if (!wait) return shader_id;
+
+     GLint result = GL_FALSE;
+-    GLint info_log_length;
++    GLint info_log_length = 0;
+     glGetShaderiv(shader_id, GL_COMPILE_STATUS, &result);
+-    glGetShaderiv(shader_id, GL_INFO_LOG_LENGTH, &info_log_length);
++#if defined(__EMSCRIPTEN__)
++    // Even a successful object's info-log query can wait for other ANGLE
++    // compilation work. Fetch logs only when they are needed to report failure.
++    const bool read_log = result == GL_FALSE;
++#else
++    const bool read_log = true;
++#endif
++    if (read_log) {
++        glGetShaderiv(shader_id, GL_INFO_LOG_LENGTH, &info_log_length);
++    }
+
+     if (info_log_length > 1) {
+         std::vector<char> shader_error(info_log_length);
+@@ -121,20 +130,40 @@
+ #endif
+     glLinkProgram(program_id);
+
+-    for (GLuint shader : shaders) {
+-        if (shader != 0) glDetachShader(program_id, shader);
++    if (wait) {
++        FinalizeProgram(program_id, debug_name);
++        for (GLuint shader : shaders) {
++            if (shader != 0) glDetachShader(program_id, shader);
++        }
+     }
+-    if (wait) FinalizeProgram(program_id, debug_name);
++    // ANGLE's detachShader resolves a pending link and stalls its GPU command
++    // queue, even if the browser-side call returns immediately. Async programs
++    // retain their cached shader attachments until program deletion releases them.
+     return program_id;
+ }
+
++ProgramStatus PollProgram(GLuint program_id, const std::string& debug_name) {
++    if (!program_id) return ProgramStatus::Failed;
++    GLint complete = GL_FALSE;
++    glGetProgramiv(program_id, 0x91B1, &complete);
++    if (!complete) return ProgramStatus::Pending;
++    return FinalizeProgram(program_id, debug_name) ? ProgramStatus::Ready : ProgramStatus::Failed;
++}
++
+ bool FinalizeProgram(GLuint program_id, const std::string& debug_name) {
+
+     // Check the program
+     GLint result = GL_FALSE;
+-    GLint info_log_length;
++    GLint info_log_length = 0;
+     glGetProgramiv(program_id, GL_LINK_STATUS, &result);
+-    glGetProgramiv(program_id, GL_INFO_LOG_LENGTH, &info_log_length);
++#if defined(__EMSCRIPTEN__)
++    const bool read_log = result == GL_FALSE;
++#else
++    const bool read_log = true;
++#endif
++    if (read_log) {
++        glGetProgramiv(program_id, GL_INFO_LOG_LENGTH, &info_log_length);
++    }
+
+     if (info_log_length > 1) {
+         std::vector<char> program_error(info_log_length);
+--- a/src/video_core/renderer_opengl/gl_shader_util.h
++++ b/src/video_core/renderer_opengl/gl_shader_util.h
+@@ -28,6 +28,10 @@
+ GLuint LoadProgram(bool separable_program, std::span<const GLuint> shaders,
+                    const std::string& debug_name, bool wait = true);
+
++enum class ProgramStatus { Pending, Ready, Failed };
++// Requires KHR_parallel_shader_compile; pending programs never run blocking status queries.
++ProgramStatus PollProgram(GLuint program, const std::string& debug_name);
++
+ // Call only after completion when LoadProgram was issued with wait=false.
+ bool FinalizeProgram(GLuint program, const std::string& debug_name);
+
+--- a/src/video_core/renderer_opengl/gl_webgl_stats.h
++++ b/src/video_core/renderer_opengl/gl_webgl_stats.h
+@@ -4,8 +4,8 @@
+ #include <emscripten.h>
+
+ namespace OpenGL {
+-// Pass one pointer instead of 24 EM_ASM operands. Older Emscripten glue only declares $0..$15.
+-inline void PublishWebGLStats(const std::array<double, 24>& data) {
++// Pass one pointer instead of 31 EM_ASM operands. Older Emscripten glue only declares $0..$15.
++inline void PublishWebGLStats(const std::array<double, 31>& data) {
+     EM_ASM({
+         const keys = ([
+             "fragmentLookups", "fragmentConfigMisses", "fragmentSourceMisses", "fragmentSourceHits",
+@@ -13,7 +13,8 @@
+             "preloadedPrograms", "preloadMs", "diskPrograms", "diskBytes", "persistWrites",
+             "parallelCompile", "genericInitMs", "genericPrograms", "genericDraws",
+             "asyncQueued", "asyncCompleted", "asyncFailed", "asyncPending", "asyncPeakPending",
+-            "deferredDraws", "synchronousMisses"
++            "deferredDraws", "synchronousMisses", "vertexQueued", "vertexCompleted", "vertexFailed",
++            "vertexPending", "vertexFallbacks", "preloadRemaining", "preloadIssueMs"
+         ]);
+         const stats = {};
+         for (let i = 0; i < keys.length; ++i) stats[keys[i]] = HEAPF64[($0 >> 3) + i];

@@ -25,6 +25,7 @@ ASAN_OPTIONS="${ASAN_OPTIONS:-detect_leaks=0}" "$TEST_OUTPUT/async-util"
     "$AZAHAR_SOURCE/src/video_core/shader/generator/glsl_webgl_generic.cpp" \
     -o "$TEST_OUTPUT/fixtures.js"
 node "$TEST_OUTPUT/fixtures.js" > "$TEST_OUTPUT/fixtures.json"
+node "$BUILD_ROOT/tools/tests/azahar-webgl-program-bindings.cjs" "$TEST_OUTPUT/fixtures.json"
 node - "$TEST_OUTPUT" "$BUILD_ROOT/tools/tests/azahar-webgl-generic.js" <<'JS'
 const fs = require('fs'), path = require('path');
 const [dir, harness] = process.argv.slice(2);

@@ -1,0 +1,81 @@
+{
+  "date": "2026-09-30",
+  "game": "Mario & Luigi: Dream Team",
+  "status": "Cold shader-cache diagnosis only; no production code changed in this follow-up.",
+  "instance": "127.0.0.1:8081",
+  "coreSha256": "78f9a87d5f3c392d4431b493e7e7b39ac758da211d7ec0aad203ef6cb1615b7a",
+  "cacheConditions": {
+    "azaharSourceCacheBypassed": true,
+    "preloadedShaders": 0,
+    "preloadedPrograms": 0,
+    "persistWrites": 0,
+    "chromeGpuProcessRestarted": true,
+    "chromeGpuShaderDiskCacheDisabled": true,
+    "osVendorDriverCacheControlled": false,
+    "romDownloadCacheRetained": true,
+    "saveFilesPreserved": true
+  },
+  "scope": {
+    "start": "2026-09-30T02:22:44.215+09:00",
+    "startDefinition": "FReal module loaded, a proxy for gameplay entry, not an exact user-click marker.",
+    "end": "2026-09-30T02:23:06.825+09:00",
+    "endDefinition": "First sampled snapshot showing all 18 added exact programs completed and vertex queue empty. Not a verified first-playable-frame timestamp.",
+    "durationMs": 22610.0,
+    "allSamplesVisible": true
+  },
+  "excludedSaveSelectionStage": {
+    "loadModuleResidencyMs": 25672.665000021458,
+    "reason": "Screenshot shows START GAME still awaiting selection near the end of this interval. This includes menu residency/user think time and must not be reported as loading time."
+  },
+  "observations": {
+    "programsBefore": 62,
+    "programsAfter": 80,
+    "newExactPrograms": 18,
+    "newVertexPrograms": 3,
+    "newSynchronousMisses": 0,
+    "fragmentFailures": 0,
+    "vertexFailures": 0,
+    "longestMetadataQuery": {
+      "name": "getProgramParameter",
+      "t": 153276.53500002623,
+      "ms": 4193.665000021458,
+      "parameter": 35718,
+      "program": 59,
+      "parameterName": "GL_ACTIVE_UNIFORMS",
+      "time": "2026-09-30T02:22:50.077+09:00",
+      "relativeToFieldMs": 5861.3949999809265
+    },
+    "longTasksInWindow": [
+      {
+        "t": 151728.8600000143,
+        "ms": 64
+      },
+      {
+        "t": 153254.66500002146,
+        "ms": 4217
+      },
+      {
+        "t": 167686.06999999285,
+        "ms": 54
+      }
+    ],
+    "maxSampledFrameIntervalMs": 4197.289,
+    "newAudioUnderruns": 13,
+    "romSaveStateRequestsAfterField": 0,
+    "automaticStateRestoreSelected": false
+  },
+  "codePath": [
+    "build/compile/azahar/src/video_core/renderer_opengl/gl_shader_manager.cpp:PollPendingPrograms",
+    "build/compile/azahar/src/video_core/renderer_opengl/gl_shader_util.cpp:PollProgram/FinalizeProgram",
+    "build/emsdk/upstream/emscripten/src/library_webgl.js:webglPrepareUniformLocationsBeforeFirstUse"
+  ],
+  "interpretation": [
+    "A directly measured 4.194-second GL_ACTIVE_UNIFORMS query accounts for the coincident 4.217-second main-thread task.",
+    "Asynchronous compile counters report zero new synchronous misses, but this does not cover blocking metadata/uniform queries during finalization.",
+    "Additional multi-second frame gaps occurred with much shorter CPU frame execution; their exact GPU operation was not captured.",
+    "The evidence identifies first-use shader work as an optimization target; it does not establish that all entry time is shader work."
+  ],
+  "nextImplementationTarget": "Reduce/block-proof uniform metadata initialization and first-draw driver work; validate before/after only with reset Chrome shader caches and Azahar source cache bypass.",
+  "cleanup": "Temporary GL wrappers and sampling were removed without restarting or changing the running game. Source-cache bypass and Chrome no-shader-disk-cache flag remain active in the diagnostic session.",
+  "rawEvidence": "/tmp/azahar-cold-finish-output.json"
+}

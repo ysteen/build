@@ -6,6 +6,9 @@ services:
     environment:
       SKIP_SOURCE_UPDATE: "1"
     volumes:
+      - ./build.sh:/build/build.sh:ro
+      - ./cores.json:/build/cores.json:ro
+      - ./build.json:/build/build.json:ro
       - ./output:/build/output
       - ./compile:/build/compile
       - ./patches:/build/patches:ro

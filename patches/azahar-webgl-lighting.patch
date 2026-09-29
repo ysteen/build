@@ -1,0 +1,228 @@
+--- a/src/video_core/shader/generator/glsl_webgl_generic.cpp
++++ b/src/video_core/shader/generator/glsl_webgl_generic.cpp
+@@ -16,7 +16,7 @@
+     const u32 fog = static_cast<u32>(config.texture.fog_mode.Value());
+     const auto logic = config.framebuffer.logic_op.Value();
+     if (profile.is_vulkan || !profile.has_minus_one_to_one_range || !user.IsCacheable() ||
+-        config.lighting.enable || config.proctex.enable ||
++        config.proctex.enable ||
+         config.framebuffer.shadow_rendering || config.EmulateBlend() ||
+         (texture_type != Texture::Texture2D && texture_type != Texture::Projection2D &&
+          texture_type != Texture::Disabled) || (fog != 0 && fog != 5) ||
+@@ -71,6 +71,33 @@
+             }
+         }
+     }
++    if (config.lighting.enable) {
++        const auto& light = config.lighting;
++        if (light.src_num > 8 || profile.has_fragment_shader_barycentric ||
++            profile.has_gl_nv_fragment_shader_barycentric) return std::nullopt;
++        data.lighting[0] = light.raw;
++        for (u32 i = 0; i < 8; ++i) data.lights[i / 4][i % 4] = light.lights[i].raw;
++        using Sampler = LightingRegs::LightingSampler;
++        const std::array samplers{Sampler::Distribution0, Sampler::Distribution1,
++            Sampler::Fresnel, Sampler::ReflectRed, Sampler::ReflectGreen,
++            Sampler::ReflectBlue, Sampler::SpotlightAttenuation};
++        const std::array luts{light.lut_d0, light.lut_d1, light.lut_fr, light.lut_rr,
++                             light.lut_rg, light.lut_rb, light.lut_sp};
++        for (u32 i = 0; i < luts.size(); ++i) {
++            const auto& lut = luts[i];
++            const bool enabled = lut.enable && LightingRegs::IsLightingSamplerSupported(light.config, samplers[i]);
++            if (enabled && static_cast<u32>(lut.type.Value()) > 5) return std::nullopt;
++            data.luts[i] = {enabled ? 1U : 0U, lut.abs_input.Value(),
++                            static_cast<u32>(lut.type.Value()), lut.scale_bits};
++        }
++        const auto use_texture = [&](u32 unit) {
++            if (unit < 3) data.control[1] |= 1U << unit;
++        };
++        if (light.bump_mode == LightingRegs::LightingBumpMode::NormalMap ||
++            light.bump_mode == LightingRegs::LightingBumpMode::TangentMap)
++            use_texture(light.bump_selector);
++        if (light.enable_shadow) use_texture(light.shadow_selector);
++    }
+     return data;
+ }
+
+@@ -81,6 +108,8 @@
+ in vec2 texcoord1;
+ in vec2 texcoord2;
+ in float texcoord0_w;
++in vec4 normquat;
++in vec3 view;
+ layout(location = 0) out vec4 color;
+ )";
+     source += GetFragmentUniformBlock();
+@@ -90,6 +119,9 @@
+     uvec4 pica_texture;
+     uvec4 pica_misc;
+     uvec4 pica_control;
++    uvec4 pica_lighting;
++    uvec4 pica_lights[2];
++    uvec4 pica_luts[7];
+ };
+ uniform sampler2D tex0;
+ uniform sampler2D tex1;
+@@ -109,9 +141,139 @@
+     if (projection) return textureProj(tex, vec3(coord, texcoord0_w));
+     return textureLod(tex, coord, getLod(coord * vec2(textureSize(tex, 0))) + tex_lod_bias[unit]);
+ }
++// The packed words mirror LightConfig/Light. Uniform loop bounds keep the
++// driver from generating a separate unrolled shader for every light setup.
++bool lightingFlag(uint bit) { return (pica_lighting.x & (1u << bit)) != 0u; }
++bool lightFlag(uint word, uint bit) { return (word & (1u << bit)) != 0u; }
++vec3 rotateQuaternion(vec4 q, vec3 v) {
++    return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
++}
++vec4 lightingTexture(uint unit, vec4 t0, vec4 t1, vec4 t2) {
++    if (unit == 0u) return t0;
++    if (unit == 1u) return t1;
++    if (unit == 2u) return t2;
++    return vec4(0.0);
++}
++float lightingLookup(int sampler_index, float pos, bool absolute) {
++    float scaled = pos * (absolute ? 256.0 : 128.0);
++    int index = int(clamp(floor(scaled), absolute ? 0.0 : -128.0,
++                         absolute ? 255.0 : 127.0));
++    float delta = scaled - float(index);
++    if (index < 0) index += 256;
++    index += lighting_lut_offset[sampler_index >> 2][sampler_index & 3];
++    vec2 entry = texelFetch(texture_buffer_lut_lf, ivec2(index & 2047, index >> 11), 0).rg;
++    return entry.r + entry.g * delta;
++}
++float lightingLut(int lut, int sampler_index, bool two_sided, vec3 normal,
++                  vec3 tangent, vec3 light_vector, vec3 half_vector, vec3 spot_dir) {
++    uvec4 config = pica_luts[lut];
++    float pos = 0.0;
++    if (config.z == 0u) pos = dot(normal, normalize(half_vector));
++    else if (config.z == 1u) pos = dot(normalize(view), normalize(half_vector));
++    else if (config.z == 2u) pos = dot(normal, normalize(view));
++    else if (config.z == 3u) pos = dot(light_vector, normal);
++    else if (config.z == 4u) pos = dot(light_vector, spot_dir);
++    else if (config.z == 5u && ((pica_lighting.x >> 11u) & 15u) == 8u)
++        pos = dot(normalize(half_vector) - normal * dot(normal, normalize(half_vector)), tangent);
++    if (config.y != 0u) pos = two_sided ? abs(pos) : max(pos, 0.0);
++    return uintBitsToFloat(config.w) * lightingLookup(sampler_index, pos, config.y != 0u);
++}
++void calculateLighting(vec4 t0, vec4 t1, vec4 t2,
++                       out vec4 primary_fragment, out vec4 secondary_fragment) {
++    primary_fragment = vec4(0.0);
++    secondary_fragment = vec4(0.0);
++    if (!lightingFlag(0u)) return;
++    vec3 surface_normal = vec3(0.0, 0.0, 1.0);
++    vec3 surface_tangent = vec3(1.0, 0.0, 0.0);
++    uint bump = (pica_lighting.x >> 5u) & 3u;
++    if (bump == 1u || bump == 2u) {
++        vec3 perturbation = 2.0 * lightingTexture((pica_lighting.x >> 7u) & 3u, t0, t1, t2).rgb - 1.0;
++        if (bump == 1u) {
++            surface_normal = perturbation;
++            if (lightingFlag(9u))
++                surface_normal.z = sqrt(max(1.0 - dot(surface_normal.xy, surface_normal.xy), 0.0));
++        } else surface_tangent = perturbation;
++    }
++    vec4 q = normalize(normquat);
++    vec3 normal = rotateQuaternion(q, surface_normal);
++    vec3 tangent = rotateQuaternion(q, surface_tangent);
++    vec4 shadow = vec4(1.0);
++    if (lightingFlag(17u)) {
++        shadow = lightingTexture((pica_lighting.x >> 22u) & 3u, t0, t1, t2);
++        if (lightingFlag(20u)) shadow = vec4(1.0) - shadow;
++    }
++    vec4 diffuse_sum = vec4(0.0, 0.0, 0.0, 1.0);
++    vec4 specular_sum = vec4(0.0, 0.0, 0.0, 1.0);
++    uint count = (pica_lighting.x >> 1u) & 15u;
++    for (uint slot = 0u; slot < count; ++slot) {
++        uint light_config = pica_lights[slot >> 2u][slot & 3u];
++        uint num = light_config & 7u;
++        LightSrc light = light_src[num];
++        vec3 light_vector = light.position;
++        if (!lightFlag(light_config, 3u)) light_vector += view;
++        float distance = length(light_vector);
++        light_vector = normalize(light_vector);
++        vec3 half_vector = normalize(view) + light_vector;
++        vec3 spot_dir = light.spot_direction;
++        float dot_product = lightFlag(light_config, 4u) ? abs(dot(light_vector, normal)) : max(dot(light_vector, normal), 0.0);
++        float highlight = lightingFlag(10u) ? sign(dot_product) : 1.0;
++        // Match the specialized renderer's LUT sidedness lookup by light ID.
++        bool lut_two_sided = lightFlag(pica_lights[num >> 2u][num & 3u], 4u);
++        float spot = 1.0, attenuation = 1.0;
++        if (lightFlag(light_config, 6u) && pica_luts[6].x != 0u)
++            spot = lightingLut(6, int(8u + num), lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        if (lightFlag(light_config, 5u))
++            attenuation = lightingLookup(int(16u + num), clamp(light.dist_atten_scale * distance + light.dist_atten_bias, 0.0, 1.0), true);
++        float geo = 1.0;
++        if (lightFlag(light_config, 7u) || lightFlag(light_config, 8u)) {
++            geo = dot(half_vector, half_vector);
++            geo = geo == 0.0 ? 0.0 : min(dot_product / geo, 1.0);
++        }
++        float d0 = 1.0, d1 = 1.0;
++        if (pica_luts[0].x != 0u)
++            d0 = lightingLut(0, 0, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        if (pica_luts[1].x != 0u)
++            d1 = lightingLut(1, 1, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        vec3 reflection = vec3(1.0);
++        if (pica_luts[3].x != 0u)
++            reflection.r = lightingLut(3, 6, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        reflection.g = reflection.r;
++        reflection.b = reflection.r;
++        if (pica_luts[4].x != 0u)
++            reflection.g = lightingLut(4, 5, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        if (pica_luts[5].x != 0u)
++            reflection.b = lightingLut(5, 4, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++        vec3 specular0 = d0 * light.specular_0;
++        vec3 specular1 = d1 * reflection * light.specular_1;
++        if (lightFlag(light_config, 7u)) specular0 *= geo;
++        if (lightFlag(light_config, 8u)) specular1 *= geo;
++        if (slot + 1u == count && pica_luts[2].x != 0u) {
++            float fresnel = lightingLut(2, 3, lut_two_sided, normal, tangent, light_vector, half_vector, spot_dir);
++            if (lightingFlag(15u)) diffuse_sum.a = fresnel;
++            if (lightingFlag(16u)) specular_sum.a = fresnel;
++        }
++        vec3 diffuse = light.diffuse * dot_product;
++        if (lightingFlag(18u) && lightFlag(light_config, 9u)) diffuse *= shadow.rgb;
++        diffuse_sum.rgb += (diffuse + light.ambient) * attenuation * spot;
++        vec3 specular = (specular0 + specular1) * highlight * attenuation * spot;
++        if (lightingFlag(19u) && lightFlag(light_config, 9u)) specular *= shadow.rgb;
++        specular_sum.rgb += specular;
++    }
++    if (lightingFlag(21u)) {
++        if (lightingFlag(15u)) diffuse_sum.a *= shadow.a;
++        if (lightingFlag(16u)) specular_sum.a *= shadow.a;
++    }
++    diffuse_sum.rgb += lighting_global_ambient;
++    primary_fragment = clamp(diffuse_sum, 0.0, 1.0);
++    secondary_fragment = clamp(specular_sum, 0.0, 1.0);
++}
++vec4 primary_fragment_color, secondary_fragment_color;
++
+ vec4 selectSource(uint selector, vec4 primary, vec4 previous, vec4 buffer_color,
+                   vec4 constant_color, vec4 t0, vec4 t1, vec4 t2) {
+     if (selector == 0u) return primary;
++    if (selector == 1u) return primary_fragment_color;
++    if (selector == 2u) return secondary_fragment_color;
+     if (selector == 3u) return t0;
+     if (selector == 4u) return t1;
+     if (selector == 5u) return t2;
+@@ -172,6 +334,7 @@
+     if ((pica_control.y & 2u) != 0u) t1 = sampleGenericTexture(tex1, texcoord1, 1, false);
+     if ((pica_control.y & 4u) != 0u)
+         t2 = sampleGenericTexture(tex2, pica_texture.y != 0u ? texcoord1 : texcoord2, 2, false);
++    calculateLighting(t0, t1, t2, primary_fragment_color, secondary_fragment_color);
+     vec4 primary = byteround(primary_color);
+     vec4 previous = vec4(0.0), buffer_color = vec4(0.0);
+     vec4 next_buffer = tev_combiner_buffer_color;
+--- a/src/video_core/shader/generator/glsl_webgl_generic.h
++++ b/src/video_core/shader/generator/glsl_webgl_generic.h
+@@ -12,9 +12,12 @@
+     std::array<u32, 4> texture{};
+     std::array<u32, 4> misc{};
+     std::array<u32, 4> control{};
++    std::array<u32, 4> lighting{};
++    std::array<std::array<u32, 4>, 2> lights{};
++    std::array<std::array<u32, 4>, 7> luts{};
+     bool operator==(const WebGLFSConfigData&) const = default;
+ };
+-static_assert(sizeof(WebGLFSConfigData) == 144);
++static_assert(sizeof(WebGLFSConfigData) == 304);
+
+ // Unsupported effects retain the specialized renderer instead of dropping draws.
+ std::optional<WebGLFSConfigData> MakeWebGLGenericConfig(const FSConfig& config,

@@ -1,0 +1,63 @@
+--- a/src/video_core/renderer_opengl/gl_shader_util.cpp
++++ b/src/video_core/renderer_opengl/gl_shader_util.cpp
+@@ -12,6 +12,11 @@
+ #include "video_core/renderer_opengl/gl_state.h"
+ #include "video_core/renderer_opengl/gl_vars.h"
+
++#if defined(__EMSCRIPTEN__) && defined(__wasm__)
++#include <emscripten.h>
++#include "video_core/renderer_opengl/gl_webgl_program_bindings.h"
++#endif
++
+ namespace OpenGL {
+
+ GLuint LoadShader(std::string_view source, GLenum type, const std::string& debug_name, bool wait) {
+@@ -180,6 +185,9 @@
+
+ #if defined(__EMSCRIPTEN__)
+     if (result == GL_TRUE) {
++#if defined(__wasm__)
++        BindWebGLProgramResources(program_id, OpenGLState::GetCurState().draw.shader_program);
++#else
+         glUseProgram(program_id);
+         const auto set_sampler = [&](const char* name, GLint unit) {
+             const GLint loc = glGetUniformLocation(program_id, name);
+@@ -208,6 +216,7 @@
+         set_block("pica_generic_config", 3);
+         // Finalization also runs between draws. Keep the tracked and actual GL state equal.
+         glUseProgram(OpenGLState::GetCurState().draw.shader_program);
++#endif
+     }
+ #endif
+
+--- /dev/null
++++ b/src/video_core/renderer_opengl/gl_webgl_program_bindings.h
+@@ -0,0 +1,28 @@
++// Copyright Citra Emulator Project / Azahar Emulator Project
++// Licensed under GPLv2 or any later version
++// Refer to the license.txt file included.
++#pragma once
++
++// Named WebGL lookups avoid Emscripten's enumeration of every active uniform.
++EM_JS(void, BindWebGLProgramResources, (unsigned int program, unsigned int previous), {
++    const object = GL.programs[program];
++    const restore = GL.programs[previous] || null;
++    GLctx.useProgram(object);
++    try {
++        const samplers = ["tex0", "tex1", "tex2", "texture_buffer_lut_lf",
++                          "texture_buffer_lut_rg", "texture_buffer_lut_rgba",
++                          "tex_normal", "tex_color"];
++        for (let unit = 0; unit < samplers.length; ++unit) {
++            const location = GLctx.getUniformLocation(object, samplers[unit]);
++            if (location !== null) GLctx.uniform1i(location, unit);
++        }
++        const blocks = ["vs_pica_data", "vs_data", "fs_data", "pica_generic_config"];
++        for (let binding = 0; binding < blocks.length; ++binding) {
++            const index = GLctx.getUniformBlockIndex(object, blocks[binding]);
++            if (index !== 0xffffffff) GLctx.uniformBlockBinding(object, index, binding);
++        }
++    } finally {
++        // The Emscripten currentProgram cache stays equal to the restored state.
++        GLctx.useProgram(restore);
++    }
++});

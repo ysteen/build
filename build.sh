@@ -226,6 +226,22 @@ compileProject() {
     fi
 
     if [ "$name" = "azahar" ]; then
+        azaharVertexInputPatch="$initialPath/patches/azahar-webgl-vertex-input.patch"
+        if git apply --reverse --check "$azaharVertexInputPatch" 2>/dev/null; then
+            git apply --reverse "$azaharVertexInputPatch"
+        fi
+        azaharBindingsPatch="$initialPath/patches/azahar-webgl-program-bindings.patch"
+        if git apply --reverse --check "$azaharBindingsPatch" 2>/dev/null; then
+            git apply --reverse "$azaharBindingsPatch"
+        fi
+        azaharLightingPatch="$initialPath/patches/azahar-webgl-lighting.patch"
+        if git apply --reverse --check "$azaharLightingPatch" 2>/dev/null; then
+            git apply --reverse "$azaharLightingPatch"
+        fi
+        azaharStartupPatch="$initialPath/patches/azahar-webgl-startup.patch"
+        if git apply --reverse --check "$azaharStartupPatch" 2>/dev/null; then
+            git apply --reverse "$azaharStartupPatch"
+        fi
         azaharFirstDrawPatch="$initialPath/patches/azahar-webgl-first-draw.patch"
         if git apply --reverse --check "$azaharFirstDrawPatch" 2>/dev/null; then
             git apply --reverse "$azaharFirstDrawPatch"
@@ -289,6 +305,30 @@ compileProject() {
             git apply "$azaharFirstDrawPatch"
         elif ! git apply --reverse --check "$azaharFirstDrawPatch" 2>/dev/null; then
             echo "Unable to apply Azahar first-draw shader patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharStartupPatch" 2>/dev/null; then
+            git apply "$azaharStartupPatch"
+        elif ! git apply --reverse --check "$azaharStartupPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar asynchronous startup patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharLightingPatch" 2>/dev/null; then
+            git apply "$azaharLightingPatch"
+        elif ! git apply --reverse --check "$azaharLightingPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar generic lighting patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharBindingsPatch" 2>/dev/null; then
+            git apply "$azaharBindingsPatch"
+        elif ! git apply --reverse --check "$azaharBindingsPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL resource binding patch" >&2
+            exit 1
+        fi
+        if git apply --check "$azaharVertexInputPatch" 2>/dev/null; then
+            git apply "$azaharVertexInputPatch"
+        elif ! git apply --reverse --check "$azaharVertexInputPatch" 2>/dev/null; then
+            echo "Unable to apply Azahar WebGL vertex input patch" >&2
             exit 1
         fi
     fi

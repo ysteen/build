@@ -6,6 +6,8 @@ async function verifyAzaharGeneric(input) {
     const extension = gl.getExtension('KHR_parallel_shader_compile');
     const prefix = '#version 300 es\nprecision highp float;\nprecision highp int;\n';
     const programs = new Map(), shaders = [], buffers = [], textures = [];
+    const bindResources = new Function('GL', 'GLctx', 'program', 'previous',
+        `return (${input.programBindings})(program, previous);`);
     const compile = (type, source) => {
         const shader = gl.createShader(type);
         shaders.push(shader);
@@ -53,15 +55,17 @@ void main() {
         }
         if (!gl.getProgramParameter(program, gl.LINK_STATUS))
             throw new Error(gl.getProgramInfoLog(program) + '\n' + gl.getShaderInfoLog(fragment));
-        gl.useProgram(program);
-        for (const [name, unit] of [['tex0',0], ['tex1',1], ['tex2',2], ['texture_buffer_lut_lf',3]])
-            gl.uniform1i(gl.getUniformLocation(program, name), unit);
+        const previous = gl.getParameter(gl.CURRENT_PROGRAM);
+        bindResources({programs: [null, program, previous]}, gl, 1, 2);
+        if (gl.getParameter(gl.CURRENT_PROGRAM) !== previous)
+            throw new Error('Program binding restoration failed');
         for (const [name, binding] of [['fs_data',2], ['pica_generic_config',3]]) {
             const index = gl.getUniformBlockIndex(program, name);
             if (index !== gl.INVALID_INDEX) {
                 const size = gl.getActiveUniformBlockParameter(program, index, gl.UNIFORM_BLOCK_DATA_SIZE);
-                if (size !== (binding === 2 ? 1328 : 144)) throw new Error(`Block ${name} size ${size}`);
-                gl.uniformBlockBinding(program, index, binding);
+                if (size !== (binding === 2 ? 1328 : 304)) throw new Error(`Block ${name} size ${size}`);
+                if (gl.getActiveUniformBlockParameter(program, index, gl.UNIFORM_BLOCK_BINDING) !== binding)
+                    throw new Error(`Block ${name} binding mismatch`);
             }
         }
         const entry = {program, primary: gl.getUniformLocation(program,'test_primary'),
@@ -79,10 +83,22 @@ void main() {
     gl.enableVertexAttribArray(0);
     gl.vertexAttribPointer(0,2,gl.FLOAT,false,0,0);
     const uniformBuffer = makeBuffer(gl.UNIFORM_BUFFER,1328,2);
-    const configBuffer = makeBuffer(gl.UNIFORM_BUFFER,144,3);
+    const configBuffer = makeBuffer(gl.UNIFORM_BUFFER,304,3);
     const uniformData = new ArrayBuffer(1328), ints = new Int32Array(uniformData), floats = new Float32Array(uniformData);
     ints[0] = 1; ints[6] = ints[7] = 1; ints[8] = ints[9] = 3;
     floats.set([0.11,0.33,0.77],176/4);
+    floats.set([0.02,0.03,0.04],224/4);
+    for (let light=0; light<8; ++light) {
+        const start=240/4+light*28;
+        floats.set([0.08,0.12,0.16],start);
+        floats.set([0.11,0.07,0.05],start+4);
+        floats.set([0.14+light*0.01,0.16,0.09],start+8);
+        floats.set([0.015,0.02,0.01],start+12);
+        floats.set([0.3+light*0.07,0.2,light%2 ? -0.4 : 0.7],start+16);
+        floats.set([0.2,0.3,-0.6],start+20);
+        floats[start+23]=0.05; floats[start+24]=0.15;
+    }
+    for(let lut=0;lut<24;++lut) ints[80/4+lut]=128+lut*256;
     for (let stage=0; stage<6; ++stage)
         floats.set([0.13 + stage*0.09, 0.27 + stage*0.04, 0.63 - stage*0.07, 0.79 - stage*0.05],1136/4+stage*4);
     floats.set([0.31,0.43,0.19,0.61],1232/4);
@@ -96,9 +112,14 @@ void main() {
             gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA8,4,4,0,gl.RGBA,gl.UNSIGNED_BYTE,texels);
             floats.set([0.17+unit*0.21,0.71-unit*0.13,0.41,0.83],1264/4+unit*4);
         } else {
-            const lut = new Float32Array(2048*2);
+            const lut = new Float32Array(2048*4*2);
             for(let i=0;i<128;++i) { lut[i*2] = i/128; lut[i*2+1] = 1/128; }
-            gl.texImage2D(gl.TEXTURE_2D,0,gl.RG32F,2048,1,0,gl.RG,gl.FLOAT,lut);
+            for(let table=0;table<24;++table)
+                for(let i=0;i<256;++i) {
+                    const offset=(128+table*256+i)*2;
+                    lut[offset]=0.1+table*0.013+i/512; lut[offset+1]=1/512;
+                }
+            gl.texImage2D(gl.TEXTURE_2D,0,gl.RG32F,2048,4,0,gl.RG,gl.FLOAT,lut);
         }
     }
     let comparisons=0, changedPixels=0, depthComparisons=0;
@@ -152,7 +173,7 @@ void main() {
         }
         if(!changedPixels) throw new Error('No rendered pixels');
         return {passed:true,fixtures:input.fixtures.length,comparisons,pixelsPerComparison:16,
-            depthComparisons,unsupportedRejected:input.unsupportedRejected,uniformSizes:[1328,144],
+            depthComparisons,unsupportedRejected:input.unsupportedRejected,uniformSizes:[1328,304],
             parallelCompile:!!extension,genericCompileMs,maxCompileCallMs,maxLinkCallMs};
     } finally {
         gl.useProgram(null);

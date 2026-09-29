@@ -1,0 +1,170 @@
+{
+  "date": "2026-09-30",
+  "status": "Implemented and deployed to test instance; first scene stalls remain unresolved.",
+  "instance": "http://127.0.0.1:8081",
+  "appImage": "romm-custom-dosbox-pure:5.2.0-azahar-lighting-20260930",
+  "workerImage": "romm-romforge:archives-3ds",
+  "coreSha256": "78f9a87d5f3c392d4431b493e7e7b39ac758da211d7ec0aad203ef6cb1615b7a",
+  "changes": [
+    "Decode packed core reports and reuse the buildStart core cache key.",
+    "Compile vertex programs asynchronously with CPU vertex fallback.",
+    "Spread persistent shader cache warmup over bounded slices.",
+    "Support lighting in the generic fragment shader while exact programs compile.",
+    "Avoid successful WebGL info-log queries and immediate asynchronous shader detachment.",
+    "Add deployment helper flags --romforge, --no-romforge, --no-build and --env-file; preserve credentials and normalization settings; reconnect worker after app recreation."
+  ],
+  "tests": {
+    "frontend": 836,
+    "frontendFiles": 72,
+    "deploymentScript": 5,
+    "directorySaves": 12,
+    "runtimeTestFiles": 2,
+    "typecheck": "pass",
+    "productionBuild": "pass",
+    "nativeCompletionAsanUbsan": "pass",
+    "webgl": {
+      "passed": true,
+      "fixtures": 171,
+      "comparisons": 609,
+      "pixelsPerComparison": 16,
+      "depthComparisons": 24,
+      "unsupportedRejected": 8,
+      "uniformSizes": [
+        1328,
+        304
+      ],
+      "parallelCompile": true,
+      "genericCompileMs": 863.9000000357628,
+      "maxCompileCallMs": 0.19999998807907104,
+      "maxLinkCallMs": 0.19999998807907104
+    },
+    "wasmBuild": "pass",
+    "patchReverseChecks": "pass",
+    "diffChecks": "pass"
+  },
+  "sourceCacheBypassedRun": {
+    "durationSeconds": 90,
+    "driverCacheControlled": false,
+    "allSampledFrameWindows": {
+      "count": 40,
+      "elapsedMs": 79500,
+      "meanCoreFps": 22.452830188679247,
+      "maxFrameIntervalMs": 20724.475,
+      "audioUnderruns": 21
+    },
+    "startupMs": 4436.22000002861,
+    "shader": {
+      "fragmentLookups": 265824,
+      "fragmentConfigMisses": 40,
+      "fragmentSourceMisses": 39,
+      "fragmentSourceHits": 1,
+      "programLookups": 265823,
+      "programMisses": 40,
+      "programCount": 36,
+      "preloadedShaders": 0,
+      "preloadedPrograms": 0,
+      "preloadMs": 0,
+      "diskPrograms": 0,
+      "diskBytes": 32,
+      "persistWrites": 0,
+      "parallelCompile": true,
+      "genericInitMs": 1.0849609375,
+      "genericPrograms": 8,
+      "genericDraws": 980,
+      "asyncQueued": 39,
+      "asyncCompleted": 35,
+      "asyncFailed": 0,
+      "asyncPending": 4,
+      "asyncPeakPending": 4,
+      "deferredDraws": 122,
+      "synchronousMisses": 1,
+      "vertexQueued": 8,
+      "vertexCompleted": 8,
+      "vertexFailed": 0,
+      "vertexPending": 0,
+      "vertexFallbacks": 220,
+      "preloadRemaining": 0,
+      "preloadIssueMs": 0
+    },
+    "errors": [],
+    "lateLongTasksAfter10Seconds": [],
+    "lightingFallbackUploadsAfterProbeAttached": 2
+  },
+  "normalCachedRun": {
+    "startupMs": 4008.589999973774,
+    "sampledWindowMs": 37576,
+    "coreFps": 50.48435171385991,
+    "maxFrameMs": 5949.644,
+    "audioUnderruns": 1,
+    "shader": {
+      "fragmentLookups": 279322,
+      "fragmentConfigMisses": 40,
+      "fragmentSourceMisses": 9,
+      "fragmentSourceHits": 31,
+      "programLookups": 279321,
+      "programMisses": 4,
+      "programCount": 47,
+      "preloadedShaders": 38,
+      "preloadedPrograms": 47,
+      "preloadMs": 1.635009765625,
+      "diskPrograms": 47,
+      "diskBytes": 354912,
+      "persistWrites": 0,
+      "parallelCompile": true,
+      "genericInitMs": 0.530029296875,
+      "genericPrograms": 8,
+      "genericDraws": 179,
+      "asyncQueued": 51,
+      "asyncCompleted": 47,
+      "asyncFailed": 0,
+      "asyncPending": 4,
+      "asyncPeakPending": 4,
+      "deferredDraws": 19,
+      "synchronousMisses": 0,
+      "vertexQueued": 8,
+      "vertexCompleted": 8,
+      "vertexFailed": 0,
+      "vertexPending": 0,
+      "vertexFallbacks": 3,
+      "preloadRemaining": 0,
+      "preloadIssueMs": 27.364013671875
+    },
+    "errors": []
+  },
+  "verification": {
+    "worker": {
+      "enabled": true,
+      "available": true,
+      "keysReady": false,
+      "ciaReady": false,
+      "normalizeOnScan": true
+    },
+    "heartbeat": 200,
+    "privateResources": 404,
+    "cacheBypass": false
+  },
+  "diagnosticsRemoved": {
+    "cacheBypass": false,
+    "diagnosticProbe": false,
+    "gameStarted": false
+  },
+  "workerLimits": {
+    "cpus": 0.5,
+    "memoryBytes": 2147483648,
+    "concurrency": 1
+  },
+  "limitations": [
+    "First-use displayed-frame stalls remain despite responsive JavaScript; no claim of complete transition fix.",
+    "Browser driver cache and scene progression were not controlled, so runs are not an old/new speedup benchmark.",
+    "EJS.started is not a usable-frame measurement.",
+    "A detailed GPU trace and its overlapping run were excluded after the collector used excessive memory; only that collector was stopped.",
+    "Procedural textures, cube/shadow textures and other unsupported generic effects retain synchronous specialization.",
+    "Automatic save-state restoration can still time out in DrainAsyncOperations; startup measurements deselected the state without deleting it.",
+    "Retail 3DS conversion and CIA installation need user keys and a device check; no library ROM was converted."
+  ],
+  "documents": [
+    "build/AZAHAR_PERFORMANCE.md",
+    "romm/docs/ROMFORGE_WORKER.md",
+    "romm/test-instance/ROMFORGE.md"
+  ]
+}

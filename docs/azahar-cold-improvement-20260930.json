@@ -1,0 +1,185 @@
+{
+  "date": "2026-09-30",
+  "game": "Mario & Luigi: Dream Team",
+  "instance": "127.0.0.1:8081",
+  "image": "romm-custom-dosbox-pure:5.2.0-azahar-vertex-20260930",
+  "coreSha256": "05f906711477772611d4c8b51271b2094314bbf8c7a50a53bbb5355854ea9be2",
+  "coreArchiveBytes": 3515865,
+  "changes": [
+    "Bind named WebGL resources without enumerating all active uniforms. This alone did not remove the GPU queue stalls.",
+    "Convert accelerated vertex attributes to FLOAT4 before upload, preserving integer values, float bits, padding and default components.",
+    "Retain byte-verified upload reuse and software fallback for unsupported or oversized layouts.",
+    "Apply and reverse both new patches in the incremental core build."
+  ],
+  "cacheConditions": {
+    "azaharSourceCacheBypassed": true,
+    "chromeGpuProcessRestarted": true,
+    "chromeGpuShaderDiskCacheDisabled": true,
+    "osVendorDriverCacheControlled": false,
+    "romDownloadCacheRetained": true,
+    "automaticStateRestore": false
+  },
+  "scope": {
+    "start": "FReal game module loaded",
+    "end": "First sampled completed state with the final observed program count and empty vertex/fragment queues",
+    "warning": "Shader preparation proxy, not exact click-to-first-playable time. Menu waits and scripted input delays are excluded. Async fallback scheduling changes the number of transient program pairs."
+  },
+  "originalBaseline": "azahar-cold-entry-20260930.json",
+  "before": {
+    "rawEvidence": "/tmp/azahar-field-trace2-output.json",
+    "epochMs": 1790704617386.675,
+    "fieldStartMs": 191422.6400000453,
+    "readyMs": 214366.52000004053,
+    "shaderPreparationMs": 22943.87999999523,
+    "allSamplesVisible": true,
+    "programsBefore": 59,
+    "programsAfter": 77,
+    "vertexProgramsBefore": 9,
+    "vertexProgramsAfter": 12,
+    "newSynchronousMisses": 0,
+    "fragmentFailures": 0,
+    "vertexFailures": 0,
+    "preloadedShaders": 0,
+    "preloadedPrograms": 0,
+    "persistWrites": 0,
+    "maxFrameIntervalMs": 4754.33,
+    "maxPreFieldFrameIntervalMs": 8995.924,
+    "maxMetadataQueryMs": 4749.710000038147,
+    "maxLongTaskMs": 4780,
+    "newAudioUnderruns": 12,
+    "coreSha256": "19c3d0146a6b3742e6360c067f5ff10e9ac871acecc3de14943d1d3f7f1cb19e"
+  },
+  "afterTraced": {
+    "rawEvidence": "/tmp/azahar-vertex-cold-trace-output.json",
+    "epochMs": 1790705526615.63,
+    "fieldStartMs": 67831.90000003576,
+    "readyMs": 78502.7649999857,
+    "shaderPreparationMs": 10670.864999949932,
+    "allSamplesVisible": true,
+    "programsBefore": 63,
+    "programsAfter": 90,
+    "vertexProgramsBefore": 9,
+    "vertexProgramsAfter": 12,
+    "newSynchronousMisses": 0,
+    "fragmentFailures": 0,
+    "vertexFailures": 0,
+    "preloadedShaders": 0,
+    "preloadedPrograms": 0,
+    "persistWrites": 0,
+    "maxFrameIntervalMs": 307.82,
+    "maxPreFieldFrameIntervalMs": 763.179,
+    "maxMetadataQueryMs": 148.36500000953674,
+    "maxLongTaskMs": 182,
+    "newAudioUnderruns": 42
+  },
+  "traces": {
+    "beforeStartupAndMenu": {
+      "rawEvidence": "/tmp/azahar-full-cold-trace2-output.json.trace.json",
+      "mainThreadCompiles": 70,
+      "mainThreadCompileMs": 50023.56,
+      "mainThreadVertexCompiles": 68,
+      "mainThreadVertexCompileMs": 49376.135
+    },
+    "beforeField": {
+      "rawEvidence": "/tmp/azahar-field-trace2-output.json.trace.json",
+      "mainThreadCompiles": 23,
+      "mainThreadCompileMs": 17493.57,
+      "mainThreadVertexCompiles": 23,
+      "mainThreadVertexCompileMs": 17493.57
+    },
+    "afterStartupMenuAndField": {
+      "rawEvidence": "/tmp/azahar-vertex-cold-trace-output.json.trace.json",
+      "mainThreadCompiles": 2,
+      "mainThreadCompileMs": 744.74,
+      "mainThreadVertexCompiles": 0,
+      "mainThreadVertexCompileMs": 0.0
+    }
+  },
+  "steadySameScene": [
+    {
+      "floatInputs": true,
+      "sampleCount": 13,
+      "allVisible": true,
+      "timeWeightedCoreFps": 60.10143062599349,
+      "medianCoreRunMs": 11.054,
+      "newPrograms": 0,
+      "newAudioUnderruns": 0
+    },
+    {
+      "floatInputs": false,
+      "sampleCount": 12,
+      "allVisible": true,
+      "timeWeightedCoreFps": 60.130718954248366,
+      "medianCoreRunMs": 10.9435,
+      "newPrograms": 0,
+      "newAudioUnderruns": 0
+    },
+    {
+      "floatInputs": true,
+      "sampleCount": 12,
+      "allVisible": true,
+      "timeWeightedCoreFps": 59.9885424339144,
+      "medianCoreRunMs": 11.1465,
+      "newPrograms": 0,
+      "newAudioUnderruns": 0
+    }
+  ],
+  "tests": {
+    "nativeAsanUbsan": true,
+    "nativeWasmConversions": 32,
+    "gpuFloatComparisons": 384,
+    "shaderConfigurations": 171,
+    "shaderColorComparisons": 609,
+    "shaderDepthComparisons": 24,
+    "fullCoreBuild": true,
+    "jsSyntax": true,
+    "wasmValidation": true,
+    "archiveExtraction": true,
+    "reversePatchCheck": true,
+    "runtimeTestFiles": 2
+  },
+  "deployment": {
+    "heartbeat": 200,
+    "privateResources": 404,
+    "workerCpu": 0.5,
+    "workerMemoryGiB": 2,
+    "workerNetworkReattached": true
+  },
+  "limitations": [
+    "Short cold-entry audio gaps remain; the traced field underrun count rose from 12 to 42 despite much shorter maximum stalls. Event counts do not measure total silence duration.",
+    "Same-scene steady samples had no added audio underruns. This is not a long-duration audio test.",
+    "Other games, maps, GPUs and browser backends have not been comprehensively verified.",
+    "Existing RetroArch stack-address and Wasm signature build warnings remain."
+  ],
+  "afterUntracedRepeat": {
+    "rawEvidence": "/tmp/azahar-vertex-cold-confirm-output.json",
+    "epochMs": 1790705815022.525,
+    "fieldStartMs": 89161.69999998808,
+    "readyMs": 100001.78500002623,
+    "shaderPreparationMs": 10840.085000038147,
+    "allSamplesVisible": true,
+    "programsBefore": 62,
+    "programsAfter": 89,
+    "vertexProgramsBefore": 9,
+    "vertexProgramsAfter": 12,
+    "newSynchronousMisses": 0,
+    "fragmentFailures": 0,
+    "vertexFailures": 0,
+    "preloadedShaders": 0,
+    "preloadedPrograms": 0,
+    "persistWrites": 0,
+    "maxFrameIntervalMs": 109.49,
+    "maxPreFieldFrameIntervalMs": 753.995,
+    "maxMetadataQueryMs": 13.634999990463257,
+    "maxLongTaskMs": 98,
+    "newAudioUnderruns": 35
+  },
+  "repeatWithoutGpuTraceStillHasGlTimingHooks": true,
+  "cleanup": {
+    "probeInstalled": false,
+    "sourceCacheBypass": false,
+    "chromeGpuShaderDiskCacheDisabled": false,
+    "gameRunning": false,
+    "page": "/rom/17/ejs"
+  }
+}

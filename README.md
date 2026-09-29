@@ -11,9 +11,42 @@ completed EmulatorJS packages in `output/`:
 ```
 
 Docker Compose installs the pinned Emscripten SDK in the image and reuses the
-compile tree in a named volume. The distributable files are written to the host
+host `compile/` directory. The build script, core settings and patches are mounted
+from the checkout, so reusing the builder image still uses current build logic.
+The distributable files are written to the host
 `output` directory. Prebuilt copies are committed there as well, including
 `dosbox_pure.zip` and both threaded `.data` variants.
+
+## Azahar Docker build
+
+Create the builder image once, or rebuild it after changing the SDK or Dockerfile:
+
+```bash
+docker compose -f compose.dosbox-pure.yml build builder
+```
+
+Build Azahar with bounded parallelism and reuse its CMake build directory:
+
+```bash
+docker compose -f compose.dosbox-pure.yml run --rm --no-deps \
+  -e BUILD_JOBS=2 -e INCREMENTAL_CMAKE=1 builder \
+  bash -lc 'source /opt/emsdk/emsdk_env.sh && ./build.sh --core=azahar'
+```
+
+Omit `INCREMENTAL_CMAKE=1` to recreate the CMake build directory. The script
+applies the Azahar patch stack on fresh sources and reverses overlapping layers
+before reapplying it on incremental builds. Compose preserves the existing source
+revision by default through `SKIP_SOURCE_UPDATE=1`.
+
+The outputs are `output/azahar-thread-wasm.data` and `output/reports/azahar.json`.
+When the RomM checkout is next to this repository, publish both files together:
+
+```bash
+../romm/scripts/update-custom-azahar-core.sh
+```
+
+Rebuild the RomM image afterward to include the updated core. See
+[Azahar performance notes](AZAHAR_PERFORMANCE.md) for shader checks and measurements.
 
 This script will download and build most of the available retroarch cores.
 

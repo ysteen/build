@@ -37,6 +37,7 @@
 !/tools/test-azahar-webgl-cache.sh
 !/tools/test-azahar-webgl-generic.sh
 !/tools/test-azahar-webgl-submission.sh
+!/tools/test-azahar-webgl-vertex-input.sh
 !/tools/tests/
 /tools/tests/*
 !/tools/tests/azahar-hotpaths.cpp
@@ -53,6 +54,9 @@
 !/tools/tests/azahar-webgl-generic.cpp
 !/tools/tests/azahar-webgl-generic.js
 !/tools/tests/azahar-webgl-async-util.cpp
+!/tools/tests/azahar-webgl-program-bindings.cjs
+!/tools/tests/azahar-webgl-vertex-input.cpp
+!/tools/tests/azahar-webgl-vertex-input.js
 !/tools/tests/azahar-webgl-submission.cpp
 !/AZAHAR_PERFORMANCE.md
 !/AZAHAR_SAVESTATES.md
@@ -60,3 +64,6 @@
 /docs/*
 !/docs/AZAHAR_WEBGL_SUBMISSION.ko.md
 !/docs/azahar-webgl-submission-2026-09-23.json
+!/docs/azahar-loading-20260930.json
+!/docs/azahar-cold-entry-20260930.json
+!/docs/azahar-cold-improvement-20260930.json

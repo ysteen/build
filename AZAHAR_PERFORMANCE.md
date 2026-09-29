@@ -1,6 +1,87 @@
 # Azahar WebAssembly performance investigation
 
-Updated: 2026-09-25 (Asia/Seoul).
+Updated: 2026-09-30 (Asia/Seoul).
+
+## Cold vertex input normalization on September 30
+
+The current 8081 image is `romm-custom-dosbox-pure:5.2.0-azahar-vertex-20260930`.
+Its 3,515,865-byte core archive has SHA-256
+`05f906711477772611d4c8b51271b2094314bbf8c7a50a53bbb5355854ea9be2`.
+
+The first candidate, `azahar-webgl-program-bindings.patch`, replaces Emscripten's
+enumeration of every active uniform with named WebGL sampler and block lookups.
+This removes unnecessary reflection, but did not by itself solve the cold stall:
+a repeat run still blocked for 4.75 seconds in `getUniformLocation`. The earlier
+single-run 0.69-second maximum was not a reliable overall improvement.
+
+A bounded `gpu.angle` trace identified the GPU queue work behind these waits.
+After asynchronous linking, ANGLE compiled additional vertex executables on
+`CrGpuMain` to convert integer input layouts. Startup/save menus contained 68 such
+compiles (49.38 seconds of accumulated GPU-thread work); first gameplay entry
+added 23 (17.49 seconds). These totals are compiler CPU time, not load durations.
+
+`azahar-webgl-vertex-input.patch` converts accelerated attributes to FLOAT4 before
+upload, matching the initial ANGLE vertex executable. BYTE, UBYTE and SHORT values
+are exactly representable; FLOAT bit patterns and missing-component defaults are
+preserved. Loader alignment, padding, register mappings, fixed attributes and
+rebased indices retain their meaning. Converted uploads use the existing verified
+upload cache. Expanded buffers remain capped at 16 MiB, and invalid/oversized
+layouts use the existing software fallback. Native rendering is unchanged.
+The build reverses this patch first and applies it after the program-binding patch.
+
+In the new trace, **zero vertex compiles ran on `CrGpuMain`** across startup,
+save selection and gameplay entry. Two initial pixel compiles remained (0.745
+seconds combined). Background compilation continues normally.
+
+Both browser runs restarted the GPU process, disabled Chrome's shader disk cache,
+and bypassed Azahar source-cache reads/writes. Preloaded shaders/programs and
+cache writes were zero. ROM download caching was retained; OS/vendor driver
+caches were not controlled. No savestate was automatically restored.
+
+| Measurement | Named-binding candidate | FLOAT4 inputs |
+| --- | ---: | ---: |
+| First gameplay shader preparation | 22.94 s | 10.67 s |
+| Maximum sampled gameplay-entry frame gap | 4,754 ms | 308 ms |
+| Maximum sampled pre-gameplay frame gap | 8,996 ms | 763 ms |
+| Maximum gameplay-entry metadata lookup | 4,750 ms | 148 ms |
+
+The preparation interval starts at the `FReal` module load and ends at the first
+snapshot with the final observed program count and empty compile queues. It is
+not an exact button-to-playable-frame measurement. Menu residency and scripted
+input waits are excluded. Async fallback scheduling produced 18 new exact pairs
+before and 27 after, with three new vertex programs in each case; work counts are
+not artificially held equal. Both runs had zero new synchronous misses and no
+vertex/fragment compile failures. The original pre-binding cold baseline was
+22.61 seconds, recorded separately in `azahar-cold-entry-20260930.json`.
+
+A second run restarted Chrome again and omitted GPU tracing, retaining the GL
+timing hooks and sampling. Preparation took 10.84 seconds; the largest entry
+frame gap was 109 ms and the largest metadata lookup was 13.63 ms. Source-cache
+preloads/writes were still zero. There were 35 cold-entry audio underruns, so
+short initial gaps remain reproducible even without the GPU trace.
+
+After removing tracing and GL probes, a same-scene FLOAT4/ordinary/FLOAT4
+comparison measured 60.10/60.13/59.99 core FPS. Median core execution was
+11.05/10.94/11.15 ms. All samples were visible, no new programs appeared, and no
+audio underruns were added in these steady samples. These warm samples only
+check conversion overhead; they are not evidence for the cold speedup.
+
+Cold audio gaps remain: gameplay-entry underrun counts were 12 before and 42
+after in the traced runs. Counts do not measure total silence duration, but this
+must not be described as eliminating all stutter. Other maps, games and GPU
+backends remain unverified. The internal, session-only
+`globalThis.__AZAHAR_FLOAT_VERTEX_INPUTS__ = false` switch restores ordinary
+inputs for comparisons; normalized inputs are the default.
+
+Validation: native ASan/UBSan and Wasm conversion/bounds tests, 32 GPU fixtures
+with 384 float comparisons, 171 shader configurations (609 color and 24 depth
+comparisons), complete core build, JS syntax, Wasm validation, archive extraction,
+patch reversal checks and two RomM runtime test files. No frontend UI was changed
+in this pass. Run `bash tools/test-azahar-webgl-vertex-input.sh` to generate the
+conversion fixtures and separate-page WebGL check.
+
+Sanitized timings, repeated-run results, deployment checks and limitations are in
+[`docs/azahar-cold-improvement-20260930.json`](docs/azahar-cold-improvement-20260930.json).
 
 ## Cold first-draw shader path
 
@@ -750,6 +831,159 @@ downloads performed by the loader's worker/cache, so an empty `coreDownloads`
 list does not prove that an old core is loaded. Verify the served artifact hash,
 rendering fix and observed stream allocation sizes as well.
 
+## Startup follow-up on September 30
+
+`azahar-webgl-startup.patch` extends the existing fragment shader work to vertex
+shader compilation and persistent cache warmup. The build script reapplies it
+after `azahar-webgl-first-draw.patch`, including on incremental builds.
+
+- New vertex programs compile and link asynchronously when
+  `KHR_parallel_shader_compile` is available. Until they are ready, draws use
+  the existing CPU vertex path. The trivial vertex shader must be selected
+  before choosing its fragment fallback.
+- Pending vertex and exact fragment queues each have a four-program limit.
+  Cache warmup issues one shader pair per polling slice, at most every 8 ms,
+  and reserves two exact-program slots for current draws. Completion polling
+  precedes link-status, log and uniform queries, which can otherwise block.
+- The old synchronous path remains for browsers without the extension and
+  fragment features that the generic shader cannot represent. For diagnostics,
+  set `globalThis.__AZAHAR_ASYNC_VERTEX__ = false` before launching the core.
+  This is a session-only comparison switch, not a player preference.
+- RomM's runtime now decodes the core report from `EJS_CacheItem.files`.
+  Previously it read the wrapper as JSON metadata and generated a random core
+  cache key on every launch. The small report is refreshed per launch; the
+  extracted core uses its stable `buildStart` until the build changes.
+
+The completion rules follow the
+[KHR extension specification](https://registry.khronos.org/webgl/extensions/KHR_parallel_shader_compile/).
+
+Verification used an isolated Windows Chrome with hardware WebGL2 and the test
+instance on port 8081. Save states and IndexedDB were not deleted. Focus
+emulation was held during timed samples. Mario & Luigi: Dream Team reached its
+title screen; a 25-second title observation ran at approximately 60 core FPS
+(approximately 30 game FPS), with zero vertex/fragment compile failures.
+
+With 40 cached programs, the asynchronous launch reported 3.04 ms preparing
+the preload queue and 19.51 ms of issuing work spread across later slices. All
+40 programs and 8 generic vertex programs completed, with no pending or failed
+programs. `EJS.started` was observed 3.48 seconds after clicking Play. The
+second launch reused the extracted core, with no core network transfer and a
+512-byte report response. These are observations of this setup, not an overall
+loading speedup claim: the first launch also downloads/decompresses the core,
+driver caches differ, and `EJS.started` is earlier than a usable game frame.
+An earlier hidden-tab result is explicitly excluded from timing comparisons.
+
+Validation: the native completion helper passed ASan/UBSan checks; 108 generated
+shader fixtures passed 420 color comparisons and 24 depth comparisons in real
+WebGL2. Eight unsupported configurations were rejected. Runtime tests cover
+report decoding, invalid reports and cache invalidation on a changed build.
+The full Wasm build and incremental patch reversal checks passed. The deployed
+startup-only core SHA-256 was
+`b28cc3e272d53d3327938b6e5618933132af9c88b65f8af8f5a3070ed3e24c91`.
+
+Startup still includes ROM copying, Wasm initialization and frame execution on
+the browser main thread. One observed startup task lasted 656 ms. This change
+does not eliminate every loading pause or make a 30 FPS game render at 60 FPS.
+The previously observed automatic save-state restore timeout in
+`DrainAsyncOperations` remains separate; startup measurements deselected the
+state through the existing UI, without deleting it.
+
+### First visits to scenes with lighting
+
+The user reported that first scene transitions were slow but revisiting the same
+scene was fast. A subsequent 25-second visible capture reproduced a 6,093 ms
+main-thread task. CPU sampling attributed 6,038 ms to `getShaderParameter`, and
+the core's synchronous shader miss counter increased during a lighting draw.
+Two audio underruns occurred in that capture. This identifies a first-use shader
+compilation stall; it is not evidence that the server or ROM download stalled.
+
+`azahar-webgl-lighting.patch` extends the generic fragment fallback with lighting
+uniforms: up to eight lights, directional/positional vectors, sidedness, distance
+and spotlight attenuation, the distribution/reflection/Fresnel LUTs, geometric
+factors, normal/tangent maps and texture-based shadow attenuation. The loop bound
+comes from a uniform to avoid unrolling a separate program for each light setup.
+The specialized shader still replaces the fallback after asynchronous linking.
+Procedural textures, cube/shadow texture types, shadow-map writes, gas and
+unsupported blending retain their specialized path.
+
+Before rebuilding the core, actual WebGL2 comparisons passed for 171 generated
+configurations, including 63 lighting cases: 609 color comparisons and 24 depth
+comparisons matched the specialized renderer. The generic shader took 864 ms to
+become ready in that fixture, while individual compile/link calls stayed at or
+below 0.2 ms. Completion was polled asynchronously.
+
+The first game run of the lighting extension exposed another synchronization
+point: successful program info-log queries. A follow-up CPU profile attributed
+3,621 ms to `getProgramInfoLog`, even though there were no link failures. On
+WebGL the final build requests shader/program logs only on failure. Native GL
+keeps its existing success diagnostics. The helper regressions assert that
+successful completion never asks for a log length and failed compilation and
+linking still retrieve their diagnostic messages.
+
+Removing log queries alone did not remove all displayed-frame stalls. In a
+90-second run, JS long tasks were short after initialization but frame intervals
+still reached several seconds. This was not treated as successful transition
+validation. `LoadProgram` also detached shaders immediately after starting a
+link. ANGLE's
+[Program::detachShader implementation](https://chromium.googlesource.com/angle/angle/+/refs/heads/chromium/7386/src/libANGLE/Program.cpp)
+calls `resolveLink`, forcing its GPU command queue to wait. Async programs now
+retain their cached shader attachments until program destruction; synchronous
+programs detach after finalization. Tests prohibit detachment on the async
+submission/completion path and retain it for synchronous programs. This matters
+even when browser-side GL calls return quickly: a blocked GPU queue can delay
+presentation and animation-frame callbacks.
+
+For a session-only first-use test, set
+`globalThis.__AZAHAR_SKIP_SHADER_CACHE__ = true` before launch. This bypasses both
+reading and writing the source cache for that session; it does not delete the
+user's stored cache. The browser driver's own compiled-program cache may still
+be warm, so this switch is not a claim of a completely cold GPU driver.
+
+### Deployed candidate and unresolved first-frame waits
+
+The final test image is
+`romm-custom-dosbox-pure:5.2.0-azahar-lighting-20260930`. Its served core SHA-256 is
+`78f9a87d5f3c392d4431b493e7e7b39ac758da211d7ec0aad203ef6cb1615b7a`.
+Native completion tests, 171 WebGL2 configurations (609 color comparisons and
+24 depth comparisons), the Wasm build and patch reversal checks passed.
+RomM's 836 frontend tests, typecheck, production build, 12 directory-save tests,
+two runtime test files and five deployment-script tests also passed.
+
+A 90-second visible run with the source cache bypassed still had substantial
+display stalls. Across all 40 distinct sampled frame windows (79.5 seconds), the
+time-weighted core rate was 22.45 FPS and the longest frame interval was
+20,724 ms. The audio underrun counter increased by 21. Excluding windows crossing
+the first ten seconds would hide that largest stall; such a filtered result must
+not be presented as the complete run. Many subsequent windows were near 60 core
+FPS, but later stalls still reached 5,686 ms. There were no captured JS exceptions
+or asynchronous shader failures, and no JS long tasks after the first ten seconds.
+The lighting fallback was observed uploading a lighting-enabled configuration.
+These results do not establish that first scene transitions have been fixed.
+
+The remaining stalls coincide with program changes while JS remains responsive.
+ANGLE's D3D11
+[draw-time recompilation path](https://raw.githubusercontent.com/google/angle/main/src/libANGLE/renderer/d3d/d3d11/Context11.cpp)
+can compile additional executables for input/output layouts after linking. This
+is a possible explanation, not a confirmed attribution for this capture.
+A detailed GPU trace collector was stopped because its event processing used
+excessive memory; that incomplete trace and the overlapping timing run are
+excluded. No browser process or user data was deleted.
+
+After stopping that collector, a normal 45-second launch with caching enabled
+loaded 47 program pairs and completed 47 async programs, with four further
+programs pending at the final snapshot. There were zero synchronous misses,
+vertex/fragment failures or captured JS exceptions. Preload preparation took
+1.64 ms, with another 27.36 ms of issue work spread across frames. Across 37.58
+seconds of sampled frame windows the core averaged 50.48 FPS, but the longest
+frame interval was still 5,950 ms and one audio underrun occurred. Driver caches
+and game progression differ from the bypass run, so this is not a controlled
+speedup comparison. `EJS.started` occurred after 4.01 seconds; it does not mean
+the first usable game frame was ready then. The isolated page was returned to
+the pre-launch screen, removing diagnostic hooks and leaving saved data intact.
+
+The deployment and verification record is in
+[`docs/azahar-loading-20260930.json`](docs/azahar-loading-20260930.json).
+
 ## Remaining limits
 
 - The warmed GPU path had zero new audio underruns in two one-minute captures.
@@ -762,9 +996,8 @@ rendering fix and observed stream allocation sizes as well.
   shader programs, browser/GPU backends and the earlier unrecorded airship-crash
   sequence remain unverified. No controlled old/new gameplay speedup has been
   established for the operand fast paths alone.
-- The loader logged that it could not parse/fetch the core report and fell back
-  to a random cache version. Startup caching still needs separate investigation;
-  the server artifact hash and the final rendering/upload behavior were verified.
+- The core-report cache bug was fixed in the September 30 follow-up above.
+  Startup observations are not a controlled overall speedup measurement.
 - Existing build warnings remain: RetroArch `get_core_options()` returns a stack
   address, and wasm-ld reports a `SaveDataArchive::OpenDirectory` signature
   mismatch. Neither warning was introduced or silently treated as resolved.
