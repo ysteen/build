@@ -38,6 +38,7 @@
 !/tools/test-azahar-webgl-generic.sh
 !/tools/test-azahar-webgl-submission.sh
 !/tools/test-azahar-webgl-vertex-input.sh
+!/tools/test-melonds-save-detection.sh
 !/tools/tests/
 /tools/tests/*
 !/tools/tests/azahar-hotpaths.cpp
@@ -58,6 +59,11 @@
 !/tools/tests/azahar-webgl-vertex-input.cpp
 !/tools/tests/azahar-webgl-vertex-input.js
 !/tools/tests/azahar-webgl-submission.cpp
+!/tools/tests/melonds-save-detection.cpp
+!/tools/tests/melonds-save-restart.cpp
+!/tools/tests/melonds-save-auto.cpp
+!/tools/tests/melonds-save-auto-integration.cpp
+!/tools/tests/extract-melonds-save-auto-integration.py
 !/AZAHAR_PERFORMANCE.md
 !/AZAHAR_SAVESTATES.md
 !/docs/

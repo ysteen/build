@@ -1,0 +1,672 @@
+--- a/src/NDSCart.cpp
++++ b/src/NDSCart.cpp
+@@ -69,6 +69,16 @@
+ 
+ static int SaveMemoryOverride = -1;
+ static bool SaveMemoryUnknown = false;
++static u32 AutoSaveAddressBytes = 0;
++static bool AutoSaveFlash = false;
++static bool AutoSaveRestart = false;
++
++bool TakeSaveDetectionRestart()
++{
++    const bool restart = AutoSaveRestart;
++    AutoSaveRestart = false;
++    return restart;
++}
+ 
+ void SetSaveMemoryOverride(const char* option)
+ {
+@@ -388,6 +398,12 @@
+ CartRetail::CartRetail(u8* rom, u32 len, u32 chipid) : CartCommon(rom, len, chipid)
+ {
+     SRAM = nullptr;
++    SRAMLength = 0;
++    SRAMType = 0;
++    SRAMAuto = false;
++    SRAMAutoPending = false;
++    SRAMAutoCommand = 0;
++    SRAMAutoLength = 0;
+ }
+ 
+ CartRetail::~CartRetail()
+@@ -402,6 +418,7 @@
+     SRAMCmd = 0;
+     SRAMAddr = 0;
+     SRAMStatus = 0;
++    SRAMAutoPending = false;
+ }
+ 
+ void CartRetail::DoSavestate(Savestate* file)
+@@ -420,11 +437,10 @@
+     file->Var32(&SRAMLength);
+     if (SRAMLength != oldlen)
+     {
+-        printf("savestate: VERY BAD!!!! SRAM LENGTH DIFFERENT. %d -> %d\n", oldlen, SRAMLength);
+-        printf("oh well. loading it anyway. adsfgdsf\n");
+-
+-        if (oldlen) delete[] SRAM;
+-        if (SRAMLength) SRAM = new u8[SRAMLength];
++        printf("NDS save: restoring %u-byte state (previously %u)\n", SRAMLength, oldlen);
++
++        delete[] SRAM;
++        SRAM = SRAMLength ? new u8[SRAMLength] : nullptr;
+     }
+     if (SRAMLength)
+     {
+@@ -440,55 +456,99 @@
+     file->Var32(&SRAMAddr);
+     file->Var8(&SRAMStatus);
+ 
+-    // SRAMManager might now have an old buffer (or one from the future or alternate timeline!)
++    if (file->IsAtleastVersion(9, 1))
++    {
++        file->Var32(&SRAMType);
++        file->Bool32(&SRAMAuto);
++        if (SRAMAuto)
++        {
++            file->Var32(&SRAMDetector.AddressBytes);
++            file->Var32(&SRAMDetector.CandidateBytes);
++            file->Var32(&SRAMDetector.CandidateVotes);
++            file->Var32(&SRAMDetector.Transactions);
++            file->Bool32(&SRAMDetector.Confirmed);
++            file->Bool32(&SRAMDetector.Flash);
++            file->Bool32(&SRAMDetector.Changed);
++            file->Bool32(&SRAMAutoPending);
++            file->Var8(&SRAMAutoCommand);
++            file->Var32(&SRAMAutoLength);
++        }
++    }
++    else if (!file->Saving && SRAMAuto)
++    {
++        const u32 addressBytes = SRAMLength <= 512 ? 1 : SRAMLength <= 65536 ? 2 : 3;
++        SRAMDetector.Initialize(SRAM, SRAMLength, addressBytes, SRAMType == 3);
++        SRAMAutoPending = false;
++    }
++
++    // The save manager must follow reallocations performed by state loading.
+     if (!file->Saving)
+     {
+         SRAMFileDirty = false;
+-        NDSCart_SRAMManager::RequestFlush();
++        AutoSaveRestart = SRAMAuto && SRAMDetector.Changed;
++        AutoSaveAddressBytes = AutoSaveRestart ? SRAMDetector.AddressBytes : 0;
++        AutoSaveFlash = AutoSaveRestart && SRAMDetector.Flash;
++        NDSCart_SRAMManager::Rebind(SRAM, SRAMLength, true);
++        if (!SRAMAuto || (SRAMDetector.Confirmed && !SRAMDetector.Changed))
++            NDSCart_SRAMManager::RequestFlush();
+     }
+ }
+ 
+ void CartRetail::LoadSave(const char* path, u32 type)
+ {
+-    if (SRAM) delete[] SRAM;
+-
++    delete[] SRAM;
++    SRAM = nullptr;
+     strncpy(SRAMPath, path, 1023);
+     SRAMPath[1023] = '\0';
+ 
+     if (type > 10) type = 0;
+-    SRAMLength = SaveMemorySize(type);
+-
++    SRAMAuto = SaveMemoryUnknown;
++    SRAMLength = SRAMAuto ? 512 : SaveMemorySize(type);
++    FILE* f = Platform::OpenFile(path, "rb");
++    if (f)
++    {
++        if (SRAMAuto && fseek(f, 0, SEEK_END) == 0)
++        {
++            const long length = ftell(f);
++            if (length > 0 && length <= 64 * 1024 * 1024)
++                SRAMLength = static_cast<u32>(length);
++        }
++        fseek(f, 0, SEEK_SET);
++    }
+     if (SRAMLength)
+     {
+         SRAM = new u8[SRAMLength];
+         memset(SRAM, 0xFF, SRAMLength);
+-    }
+-
+-    FILE* f = Platform::OpenFile(path, "rb");
+-    if (f)
+-    {
+-        fseek(f, 0, SEEK_SET);
+-        fread(SRAM, 1, SRAMLength, f);
+-
+-        fclose(f);
+-    }
++        if (f && fread(SRAM, 1, SRAMLength, f) != SRAMLength && ferror(f))
++            printf("NDS save: unable to read the complete save file\n");
++    }
++    if (f) fclose(f);
+ 
+     SRAMFileDirty = false;
++    SRAMAutoPending = false;
+     NDSCart_SRAMManager::Setup(path, SRAM, SRAMLength);
++    if (SRAMAuto)
++    {
++        SRAMDetector.Initialize(SRAM, SRAMLength, AutoSaveAddressBytes, AutoSaveFlash);
++        AutoSaveAddressBytes = 0;
++        AutoSaveFlash = false;
++        printf("NDS save runtime probe: %u address bytes, %u input bytes%s\n",
++            SRAMDetector.AddressBytes, SRAMLength, SRAMDetector.Confirmed ? " (learned)" : " (tentative)");
++    }
+ 
+     switch (type)
+     {
+-    case 1: SRAMType = 1; break; // EEPROM, small
++    case 1: SRAMType = 1; break;
+     case 2:
+     case 3:
+-    case 4: SRAMType = 2; break; // EEPROM, regular
++    case 4: SRAMType = 2; break;
+     case 5:
+     case 6:
+-    case 7: SRAMType = 3; break; // FLASH
++    case 7: SRAMType = 3; break;
+     case 8:
+     case 9:
+-    case 10: SRAMType = 4; break; // NAND
+-    default: SRAMType = 0; break; // ...whatever else
++    case 10: SRAMType = 4; break;
++    default: SRAMType = 0; break;
+     }
+ }
+ 
+@@ -500,6 +560,7 @@
+         return;
+     }
+ 
++    if (SRAMAuto && (!SRAMDetector.Confirmed || SRAMDetector.Changed || AutoSaveRestart)) return;
+     strncpy(SRAMPath, path, 1023);
+     SRAMPath[1023] = '\0';
+ 
+@@ -516,7 +577,24 @@
+ 
+ int CartRetail::ImportSRAM(const u8* data, u32 length)
+ {
+-    memcpy(SRAM, data, std::min(length, SRAMLength));
++    if (SRAMAuto && (!data || !length || length > 64 * 1024 * 1024)) return -1;
++    if (SRAMAuto)
++    {
++        u8* buffer = new u8[length];
++        memcpy(buffer, data, length);
++        delete[] SRAM;
++        SRAM = buffer;
++        data = SRAM;
++        SRAMLength = length;
++        NDSCart_SRAMManager::Rebind(SRAM, SRAMLength, true);
++        SRAMDetector.Initialize(SRAM, SRAMLength);
++        AutoSaveRestart = false;
++        AutoSaveAddressBytes = 0;
++        AutoSaveFlash = false;
++        SRAMFileDirty = false;
++        SRAMAutoPending = false;
++    }
++    if (data != SRAM) memcpy(SRAM, data, std::min(length, SRAMLength));
+     FILE* f = Platform::OpenFile(SRAMPath, "wb");
+     if (f)
+     {
+@@ -529,7 +607,9 @@
+ 
+ void CartRetail::FlushSRAMFile()
+ {
+-    if (!SRAMFileDirty) return;
++    if (SRAMAuto && SRAMAutoPending && (SRAMAutoCommand == 0x02 || SRAMAutoCommand == 0x0A ||
++        SRAMAutoCommand == 0xD8 || SRAMAutoCommand == 0xDB)) return;
++    if (!SRAMFileDirty || (SRAMAuto && (!SRAMDetector.Confirmed || SRAMDetector.Changed || AutoSaveRestart))) return;
+ 
+     SRAMFileDirty = false;
+     NDSCart_SRAMManager::RequestFlush();
+@@ -562,8 +642,132 @@
+     }
+ }
+ 
++void CartCommon::SPIEndTransaction()
++{
++}
++
++void CartRetail::SPIEndTransaction()
++{
++    if (!SRAMAuto || !SRAMAutoPending || AutoSaveRestart) return;
++    SRAMAutoPending = false;
++    if (SRAMAutoCommand == 0x02 || SRAMAutoCommand == 0x0A ||
++        SRAMAutoCommand == 0xD8 || SRAMAutoCommand == 0xDB) SRAMStatus &= ~2;
++    const bool confirmed = SRAMDetector.Confirmed;
++    SRAMDetector.Observe(SRAMAutoCommand, SRAMAutoLength);
++    if (!confirmed && SRAMDetector.Confirmed)
++    {
++        printf("NDS save runtime inferred: %u address bytes%s, %u transactions\n",
++            SRAMDetector.AddressBytes, SRAMDetector.Flash ? ", flash commands" : "", SRAMDetector.Transactions);
++    }
++    if (SRAMDetector.Changed)
++    {
++        AutoSaveAddressBytes = SRAMDetector.AddressBytes;
++        AutoSaveFlash = SRAMDetector.Flash;
++        AutoSaveRestart = true;
++        printf("NDS save runtime: restarting with inferred protocol; original save retained\n");
++    }
++}
++
++bool CartRetail::ResizeAutoSave(u32 minimum)
++{
++    if (minimum <= SRAMLength) return true;
++    static const u32 sizes[] = {512, 8192, 65536, 131072, 262144, 524288, 1048576};
++    u32 length = 0;
++    for (u32 size : sizes)
++        if (size >= minimum) { length = size; break; }
++    if (!length) return false;
++    u8* buffer = new u8[length];
++    memset(buffer, 0xFF, length);
++    if (SRAMLength) memcpy(buffer, SRAM, SRAMLength);
++    delete[] SRAM;
++    SRAM = buffer;
++    SRAMLength = length;
++    NDSCart_SRAMManager::Rebind(SRAM, SRAMLength);
++    return true;
++}
++
++u8 CartRetail::SRAMWrite_Auto(u8 val, u32 pos, bool last)
++{
++    if (AutoSaveRestart) return 0xFF;
++    if (pos == 0)
++    {
++        SPIEndTransaction();
++        if (AutoSaveRestart) return 0xFF;
++        SRAMAutoPending = true;
++        SRAMAutoCommand = val;
++        SRAMAutoLength = 0;
++        SRAMCmd = val;
++        SRAMAddr = 0;
++        if (val == 0x04) SRAMStatus &= ~2;
++        if (val == 0x06) SRAMStatus |= 2;
++        if (last) SPIEndTransaction();
++        return 0;
++    }
++    SRAMAutoLength = pos;
++    const u32 addressBytes = SRAMDetector.AddressBytes;
++    const bool tiny = addressBytes == 1;
++    const u32 addressMask = tiny ? 0x1FF : (addressBytes == 2 ? 0xFFFF : 0xFFFFFF);
++    u8 result = 0;
++    switch (SRAMCmd)
++    {
++    case 0x01:
++        if (pos == 1) SRAMStatus = (SRAMStatus & 1) | (val & 0x0C);
++        break;
++    case 0x05:
++        result = SRAMStatus | (tiny ? 0xF0 : 0);
++        break;
++    case 0x9F:
++        result = 0xFF;
++        break;
++    case 0x02:
++    case 0x03:
++    case 0x0A:
++    case 0x0B:
++        if (pos <= addressBytes)
++        {
++            SRAMAddr = (SRAMAddr << 8) | val;
++            if (tiny && (SRAMCmd == 0x0A || SRAMCmd == 0x0B)) SRAMAddr |= 0x100;
++        }
++        else if (!(SRAMCmd == 0x0B && !tiny && pos == addressBytes + 1))
++        {
++            const u32 address = SRAMAddr & addressMask;
++            if (SRAMCmd == 0x03 || SRAMCmd == 0x0B)
++                result = address < SRAMLength ? SRAM[address] : 0xFF;
++            else if ((SRAMStatus & 2) && ResizeAutoSave(address + 1))
++            {
++                // Page program supports EEPROM until erase commands identify flash.
++                SRAM[address] = (SRAMCmd == 0x02 && SRAMDetector.Flash) ? 0 : val;
++                SRAMFileDirty = true;
++            }
++            SRAMAddr++;
++        }
++        if (last && (SRAMCmd == 0x02 || SRAMCmd == 0x0A)) SRAMStatus &= ~2;
++        break;
++    case 0xD8:
++    case 0xDB:
++        if (pos <= 3) SRAMAddr = (SRAMAddr << 8) | val;
++        if (pos == 3 && (SRAMStatus & 2))
++        {
++            const u32 length = SRAMCmd == 0xD8 ? 0x10000 : 0x100;
++            const u32 address = SRAMAddr & ~(length - 1);
++            if (ResizeAutoSave(address + length))
++            {
++                memset(SRAM + address, 0, length);
++                SRAMFileDirty = true;
++            }
++        }
++        if (last) SRAMStatus &= ~2;
++        break;
++    default:
++        break;
++    }
++    if (last) SPIEndTransaction();
++    return result;
++}
++
+ u8 CartRetail::SPIWrite(u8 val, u32 pos, bool last)
+ {
++    if (SRAMAuto) return SRAMWrite_Auto(val, pos, last);
+     if (SRAMType == 0) return 0;
+ 
+     if (pos == 0)
+@@ -1517,14 +1721,14 @@
+     const bool homebrew = Header.ARM9ROMOffset < 0x4000 || gamecode == 0x23232323;
+     const SaveDetection detection = DetectSaveMemory(gamecode, CartROMSize, homebrew, SaveMemoryOverride);
+     const ROMListEntry& romparams = detection.Params;
+-    SaveMemoryUnknown = detection.Source == SaveDetectionSource::Fallback;
++    SaveMemoryUnknown = detection.Source == SaveDetectionSource::Fallback || romparams.SaveMemType > 10;
+     const char* source = "database";
+     switch (detection.Source)
+     {
+     case SaveDetectionSource::Regional: source = "regional consensus"; break;
+     case SaveDetectionSource::Homebrew: source = "homebrew"; break;
+     case SaveDetectionSource::Override: source = "user override"; break;
+-    case SaveDetectionSource::Fallback: source = "unverified fallback"; break;
++    case SaveDetectionSource::Fallback: source = "runtime probe pending"; break;
+     default: break;
+     }
+     printf("NDS save type: %s (%s)\n", SaveMemoryTypeName(romparams.SaveMemType), source);
+@@ -1901,7 +2105,7 @@
+ {
+     if ((SPICnt & 0x2040) == 0x2040 && (val & 0x2000) == 0x0000)
+     {
+-        // forcefully reset SPI hold
++        if (SPIHold && Cart) Cart->SPIEndTransaction();
+         SPIHold = false;
+     }
+ 
+--- a/src/NDSCart.h
++++ b/src/NDSCart.h
+@@ -21,6 +21,7 @@
+ 
+ #include "types.h"
+ #include "NDS_Header.h"
++#include "NDSCart_SaveAuto.h"
+ 
+ namespace NDSCart
+ {
+@@ -46,6 +47,7 @@
+     virtual void ROMCommandFinish(u8* cmd, u8* data, u32 len);
+ 
+     virtual u8 SPIWrite(u8 val, u32 pos, bool last);
++    virtual void SPIEndTransaction();
+ 
+ protected:
+     void ReadROM(u32 addr, u32 len, u8* data, u32 offset);
+@@ -82,6 +84,7 @@
+     virtual int ROMCommandStart(u8* cmd, u8* data, u32 len) override;
+ 
+     virtual u8 SPIWrite(u8 val, u32 pos, bool last) override;
++    void SPIEndTransaction() override;
+ 
+ protected:
+     void ReadROM_B7(u32 addr, u32 len, u8* data, u32 offset);
+@@ -90,6 +93,15 @@
+     u8 SRAMWrite_EEPROM(u8 val, u32 pos, bool last);
+     u8 SRAMWrite_FLASH(u8 val, u32 pos, bool last);
+ 
++    u8 SRAMWrite_Auto(u8 val, u32 pos, bool last);
++    bool ResizeAutoSave(u32 minimum);
++
++    bool SRAMAuto;
++    SaveAutoDetector SRAMDetector;
++    bool SRAMAutoPending;
++    u8 SRAMAutoCommand;
++    u32 SRAMAutoLength;
++
+     u8* SRAM;
+     u32 SRAMLength;
+     u32 SRAMType;
+@@ -206,6 +218,7 @@
+ void DecryptSecureArea(u8* out);
+ void SetSaveMemoryOverride(const char* option);
+ bool SaveMemoryNeedsOverride();
++bool TakeSaveDetectionRestart();
+ bool LoadROM(const char* path, const char* sram, bool direct);
+ bool LoadROM(const u8* romdata, u32 filelength, const char *sram, bool direct);
+ 
+--- a/src/NDSCart_SRAMManager.cpp
++++ b/src/NDSCart_SRAMManager.cpp
+@@ -67,7 +67,7 @@
+     }
+ #endif
+ 
+-    if (SecondaryBuffer) delete SecondaryBuffer;
++    if (SecondaryBuffer) delete[] SecondaryBuffer;
+     SecondaryBuffer = NULL;
+ 
+     Platform::Mutex_Free(SecondaryBufferLock);
+@@ -88,7 +88,7 @@
+     Buffer = buffer;
+     Length = length;
+ 
+-    if(SecondaryBuffer) delete SecondaryBuffer; // Delete secondary buffer, there might be previous state.
++    if(SecondaryBuffer) delete[] SecondaryBuffer; // Delete secondary buffer, there might be previous state.
+ 
+     SecondaryBuffer = new u8[length];
+     SecondaryBufferLength = length;
+@@ -108,13 +108,36 @@
+ #endif
+ }
+ 
++void Rebind(u8* buffer, u32 length, bool discardPending)
++{
++#ifndef __LIBRETRO__
++    Platform::Mutex_Lock(SecondaryBufferLock);
++#endif
++    Buffer = buffer;
++    Length = length;
++    if (discardPending)
++    {
++        PreviousFlushVersion = FlushVersion;
++        TimeAtLastFlushRequest = 0;
++    }
++#ifndef __LIBRETRO__
++    Platform::Mutex_Unlock(SecondaryBufferLock);
++#endif
++}
++
+ void RequestFlush()
+ {
+ #ifndef __LIBRETRO__
+     Platform::Mutex_Lock(SecondaryBufferLock);
+ #endif
+     printf("NDS SRAM: Flush requested\n");
+-    memcpy(SecondaryBuffer, Buffer, Length);
++    if (SecondaryBufferLength != Length)
++    {
++        delete[] SecondaryBuffer;
++        SecondaryBuffer = new u8[Length];
++        SecondaryBufferLength = Length;
++    }
++    if (Length) memcpy(SecondaryBuffer, Buffer, Length);
+     FlushVersion++;
+     TimeAtLastFlushRequest = time(NULL);
+ #ifndef __LIBRETRO__
+@@ -155,7 +178,7 @@
+     // When flushing to a file, there's no point in re-writing the exact same data.
+     if (!dst && !NeedsFlush()) return;
+     // When flushing to memory, we don't know if dst already has any data so we only check that we CAN flush.
+-    if (dst && dstLength < SecondaryBufferLength) return;
++    if (dst && (dstLength < 0 || static_cast<u32>(dstLength) < SecondaryBufferLength)) return;
+ 
+ #ifndef __LIBRETRO__
+     Platform::Mutex_Lock(SecondaryBufferLock);
+@@ -188,11 +211,17 @@
+ 
+ void UpdateBuffer(u8* src, s32 srcLength)
+ {
+-    if (!src || srcLength != Length) return;
++    if (!src || srcLength < 0 || static_cast<u32>(srcLength) != Length) return;
+ 
+     // should we create a lock for the primary buffer? this method is not intended to be called from a secondary thread in the way Flush is
+     memcpy(Buffer, src, srcLength);
+     Platform::Mutex_Lock(SecondaryBufferLock);
++    if (SecondaryBufferLength != Length)
++    {
++        delete[] SecondaryBuffer;
++        SecondaryBuffer = new u8[Length];
++        SecondaryBufferLength = Length;
++    }
+     memcpy(SecondaryBuffer, src, srcLength);
+     Platform::Mutex_Unlock(SecondaryBufferLock);
+ 
+--- a/src/NDSCart_SRAMManager.h
++++ b/src/NDSCart_SRAMManager.h
+@@ -30,6 +30,7 @@
+ 
+     void Setup(const char* path, u8* buffer, u32 length);
+     void RequestFlush();
++    void Rebind(u8* buffer, u32 length, bool discardPending = false);
+ 
+     bool NeedsFlush();
+     void FlushSecondaryBuffer(u8* dst = NULL, s32 dstLength = 0);
+--- a/src/Savestate.h
++++ b/src/Savestate.h
+@@ -23,7 +23,7 @@
+ #include "types.h"
+ 
+ #define SAVESTATE_MAJOR 9
+-#define SAVESTATE_MINOR 0
++#define SAVESTATE_MINOR 1
+ 
+ #ifdef __LIBRETRO__
+ #include <streams/memory_stream.h>
+--- a/src/libretro/libretro.cpp
++++ b/src/libretro/libretro.cpp
+@@ -327,7 +327,7 @@
+    if (NDSCart::SaveMemoryNeedsOverride())
+    {
+       struct retro_message message = {
+-         "Save type unknown (8 KiB fallback). Set Cartridge Save Type in core options, then restart.", 600
++         "Detecting cartridge save type automatically.", 180
+       };
+       environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
+    }
+@@ -786,6 +786,12 @@
+       clean_screenlayout_buffer(&screen_layout_data);
+    }
+ 
++   if (NDSCart::TakeSaveDetectionRestart())
++   {
++      retro_reset();
++      struct retro_message message = {"Save type detected. Restarting to load your save.", 180};
++      environ_cb(RETRO_ENVIRONMENT_SET_MESSAGE, &message);
++   }
+    NDSCart_SRAMManager::Flush();
+ }
+ 
+--- a/src/libretro/libretro_core_options.h
++++ b/src/libretro/libretro_core_options.h
+@@ -85,7 +85,7 @@
+       "melonds_save_memory",
+       "Cartridge Save Type (Restart)",
+       NULL,
+-      "Auto uses the ROM database, then matching regional variants only when their save types agree. Override for an unrecognized or modified game, then restart. Save file length alone can include padding and does not identify the chip.",
++      "Auto uses the ROM database, matching regional variants, then observes save commands for unknown games. It may restart once to apply the detected protocol. Override if a modified game remains ambiguous.",
+       NULL,
+       "system",
+       {
+--- /dev/null
++++ b/src/NDSCart_SaveAuto.h
+@@ -0,0 +1,96 @@
++#ifndef NDSCART_SAVEAUTO_H
++#define NDSCART_SAVEAUTO_H
++
++#include "types.h"
++
++namespace NDSCart
++{
++
++// Unknown-game SPI heuristics infer address width, never exact physical capacity.
++// The caller retains input bytes and restarts safely when Changed becomes true.
++class SaveAutoDetector
++{
++public:
++    u32 AddressBytes = 2;
++    u32 CandidateBytes = 0;
++    u32 CandidateVotes = 0;
++    u32 Transactions = 0;
++    bool Confirmed = false;
++    bool Flash = false;
++    bool Changed = false;
++
++    void Initialize(const u8* data, u32 length, u32 learnedAddress = 0, bool learnedFlash = false)
++    {
++        AddressBytes = 2;
++        CandidateBytes = 0;
++        CandidateVotes = 0;
++        Transactions = 0;
++        Confirmed = false;
++        Flash = false;
++        Changed = false;
++
++        if (learnedAddress >= 1 && learnedAddress <= 3)
++        {
++            AddressBytes = CandidateBytes = learnedAddress;
++            CandidateVotes = 2;
++            Confirmed = true;
++            Flash = learnedAddress == 3 && learnedFlash;
++            return;
++        }
++
++        // A nonempty suffix gives only a tentative minimum; padding is not a chip type.
++        if (data)
++        {
++            while (length && data[length - 1] == 0xFF) length--;
++            if (length) AddressBytes = length <= 512 ? 1 : length <= 65536 ? 2 : 3;
++        }
++    }
++
++    void Observe(u8 command, u32 payloadLength)
++    {
++        if (Transactions != 0xFFFFFFFFu) Transactions++;
++
++        if ((command == 0xD8 || command == 0xDB) && payloadLength == 3)
++        {
++            if (!Confirmed || AddressBytes == 3)
++            {
++                Changed |= AddressBytes != 3;
++                AddressBytes = CandidateBytes = 3;
++                CandidateVotes = 2;
++                Confirmed = Flash = true;
++            }
++            return;
++        }
++        if (Confirmed) return;
++
++        const bool blockWrite = (command == 0x02 || command == 0x0A) && payloadLength > 4;
++        if (command != 0x03 && !blockWrite) return;
++
++        // Typical probes read one byte; block reads commonly request multiples of four.
++        // Arbitrary read lengths remain ambiguous; two agreeing probes reduce false matches.
++        u32 candidate = payloadLength >= 2 && payloadLength <= 4
++            ? payloadLength - 1 : payloadLength > 4 ? payloadLength & 3 : 0;
++        if (!candidate) return;
++
++        // A block write may support an earlier read, but never originate or change a guess.
++        if (blockWrite && (!CandidateVotes || CandidateBytes != candidate)) return;
++
++        if (CandidateBytes != candidate)
++        {
++            CandidateBytes = candidate;
++            CandidateVotes = 1;
++            return;
++        }
++        if (CandidateVotes < 2) CandidateVotes++;
++        if (CandidateVotes == 2)
++        {
++            Changed |= AddressBytes != candidate;
++            AddressBytes = candidate;
++            Confirmed = true;
++        }
++    }
++};
++
++}
++
++#endif

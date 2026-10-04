@@ -80,28 +80,28 @@ tempPath="RetroArch/emulatorjs/core-temp"
 build() {
     rm -f *.bc
     emmake make -f "$makefileName" clean
-    emmake make -j$(nproc) -f "$makefileName" platform=emscripten $makefileArg || exit 1
+    emmake make -j"$buildJobs" -f "$makefileName" platform=emscripten $makefileArg || exit 1
     linkerfilename=( *.bc )
     mv $linkerfilename "$buildPath/$tempPath/normal/"
 }
 buildThreads() {
     rm -f *.bc
     emmake make -f "$makefileName" clean
-    emmake make -j$(nproc) -f "$makefileName" platform=emscripten EMULATORJS_THREADS=1 $makefileArg || exit 1
+    emmake make -j"$buildJobs" -f "$makefileName" platform=emscripten EMULATORJS_THREADS=1 $makefileArg || exit 1
     linkerfilename=( *.bc )
     mv $linkerfilename "$buildPath/$tempPath/threads/"
 }
 buildLegacy() {
     rm -f *.bc
     emmake make -f "$makefileName" clean
-    emmake make -j$(nproc) -f "$makefileName" platform=emscripten EMULATORJS_LEGACY=1 $makefileArg || exit 1
+    emmake make -j"$buildJobs" -f "$makefileName" platform=emscripten EMULATORJS_LEGACY=1 $makefileArg || exit 1
     linkerfilename=( *.bc )
     mv $linkerfilename "$buildPath/$tempPath/legacy/"
 }
 buildThreadsLegacy() {
     rm -f *.bc
     emmake make -f "$makefileName" clean
-    emmake make -j$(nproc) -f "$makefileName" platform=emscripten EMULATORJS_THREADS=1 EMULATORJS_LEGACY=1 $makefileArg || exit 1
+    emmake make -j"$buildJobs" -f "$makefileName" platform=emscripten EMULATORJS_THREADS=1 EMULATORJS_LEGACY=1 $makefileArg || exit 1
     linkerfilename=( *.bc )
     mv $linkerfilename "$buildPath/$tempPath/legacyThreads/"
 }
@@ -223,6 +223,30 @@ compileProject() {
             git submodule update --recursive
         fi
         projectPath="$PWD"
+    fi
+
+    if [ "$name" = "melonds" ]; then
+        melonAutoPatch="$initialPath/patches/melonds-save-autodetect.patch"
+        if git apply --reverse --check "$melonAutoPatch" 2>/dev/null; then
+            git apply --reverse "$melonAutoPatch"
+        fi
+        melonLegacyPatch="$initialPath/patches/melonds-layton-korean-save.patch"
+        if git apply --reverse --check "$melonLegacyPatch" 2>/dev/null; then
+            git apply --reverse "$melonLegacyPatch"
+        fi
+        melonSavePatch="$initialPath/patches/melonds-save-detection.patch"
+        if git apply --check "$melonSavePatch" 2>/dev/null; then
+            git apply "$melonSavePatch"
+        elif ! git apply --reverse --check "$melonSavePatch" 2>/dev/null; then
+            echo "Unable to apply melonDS save detection patch" >&2
+            exit 1
+        fi
+        if git apply --check "$melonAutoPatch" 2>/dev/null; then
+            git apply "$melonAutoPatch"
+        elif ! git apply --reverse --check "$melonAutoPatch" 2>/dev/null; then
+            echo "Unable to apply melonDS runtime save detection patch" >&2
+            exit 1
+        fi
     fi
 
     if [ "$name" = "azahar" ]; then

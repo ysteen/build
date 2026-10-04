@@ -48,6 +48,54 @@ When the RomM checkout is next to this repository, publish both files together:
 Rebuild the RomM image afterward to include the updated core. See
 [Azahar performance notes](AZAHAR_PERFORMANCE.md) for shader checks and measurements.
 
+## melonDS Docker build
+
+Save detection first uses the exact cartridge code in the ROM database. If the
+code is missing, it compares variants with the same three-character game code
+and uses their save type only when all entries agree. This detects Korean-patched
+Layton 3 (`C3JK`) as 64 KiB EEPROM without adding a game-specific database entry.
+Korean Mario & Luigi: Bowser's Inside Story (`CLJK`) retains its exact 8 KiB entry.
+
+Unrecognized or ambiguous codes use a runtime SPI observer. Existing save bytes
+provide a tentative address-width hint, then repeated reads or corroborating
+write/erase commands establish the working protocol. A changed address width
+automatically restarts the game with the original save. Registered games bypass
+the observer, and no ROM hashing or scanning is added on the 3DS.
+
+Runtime detection retains the entire input save, grows storage when writes need
+more space, and blocks speculative file writes until the protocol settles. It
+keeps save capacity separate from address width, so a padded 512 KiB file can use
+64 KiB EEPROM addressing without truncating the file. Detection observes normal
+game execution instead of adding a pre-boot scan.
+
+SPI inference is heuristic: unusual transaction lengths and NAND cartridges are
+not universally detectable. **Backend Core Options > Cartridge Save Type
+(Restart)** remains available for those cases. RomM stores manual choices per
+game, supporting the core's EEPROM, Flash, and NAND types from 512 B to 64 MiB.
+New savestates use version 9.1 to preserve the detector and pending transaction;
+existing 9.0 states remain loadable.
+
+```bash
+docker compose -f compose.dosbox-pure.yml run --rm --no-deps \
+  -e BUILD_JOBS=4 builder \
+  bash -lc 'source /opt/emsdk/emsdk_env.sh && ./build.sh --core=melonds'
+../romm/scripts/update-custom-melonds-core.sh
+```
+
+Publish all four `output/melonds-*.data` variants and `output/reports/melonds.json`
+together, then rebuild the RomM image. The verified source revision is
+`EmulatorJS/melonDS@18a057d372783b42d7e297b8731f3c3d673cdcab`.
+RomM must restart melonDS after loading an initial raw save, since this core
+reads its cartridge save on ROM load/reset rather than `refresh_save_files`.
+The restart retains the core's existing ROM allocation. The frontend can free
+its input after the first load, so using that borrowed pointer on reset corrupts
+the ROM. Retaining the owned allocation avoids an extra full-ROM copy.
+
+Run `bash tools/test-melonds-save-detection.sh` for database, regional ambiguity,
+override, SPI detection, real save-manager integration, ROM lifetime, and patch
+checks. Native tests run with address/undefined-behavior sanitizers and generated
+inputs; game ROMs and user saves are not included.
+
 This script will download and build most of the available retroarch cores.
 
 > **Warning**: Some cores do not compile on ARM based systems (such as M series MacBooks and Raspberry Pi). Use only amd64 based systems to compile.
