@@ -1,6 +1,27 @@
 # build
 A simple script that will download and build the emulatorjs core files
 
+## Linked GB/GBC and GBA cores
+
+Prepare the pinned sources from Git, then build the selected core:
+
+```bash
+bash tools/prepare-input-netplay.sh
+docker compose -f compose.dosbox-pure.yml -f compose.input-netplay.yml run --rm builder
+bash tools/prepare-gba-link.sh
+docker compose -f compose.dosbox-pure.yml -f compose.gba-link.yml run --rm builder
+```
+
+SameBoy artifacts are written to `output/input-netplay/`; mGBA splitscreen
+artifacts and homebrew fixtures are written to `output/gba-link/`.
+The scripts apply the checked-in patches and include source revisions in each
+archive's `build.json`. `INPUT_NETPLAY_RETRO_SOURCE` optionally selects another
+repository containing the pinned RetroArch commit.
+
+The matching RomM runtime, reports and archives are distributed together on
+[`ysteen/romm:custom/dosbox-pure-emulatorjs-4.3`](https://github.com/ysteen/romm/tree/custom/dosbox-pure-emulatorjs-4.3).
+Server deployments build that repository without rebuilding emulator cores.
+
 ## One-click DOSBox Pure Docker build
 
 This fork builds the persistent Emscripten DOSBox Pure core and keeps the

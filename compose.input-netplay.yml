@@ -1,0 +1,12 @@
+services:
+  builder:
+    volumes:
+      - ./tools:/build/tools:ro
+    command:
+      - bash
+      - -lc
+      - >-
+        apt-get update -qq &&
+        apt-get install -y -qq bison flex libpng-dev bsdextrautils &&
+        source /opt/emsdk/emsdk_env.sh &&
+        bash /build/tools/build-input-netplay.sh

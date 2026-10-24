@@ -10,6 +10,8 @@
 !/cores.json
 !/Dockerfile.dosbox-pure
 !/compose.dosbox-pure.yml
+!/compose.input-netplay.yml
+!/compose.gba-link.yml
 !/build-dosbox-pure.sh
 !/README.md
 !/patches
@@ -26,6 +28,17 @@
 !/.vscode/settings.json
 !/tools/
 /tools/*
+!/tools/build-input-netplay.sh
+!/tools/prepare-input-netplay.sh
+!/tools/ejs-input-netplay.inc
+!/tools/patch-sameboy-netplay.py
+!/tools/generate-link-roms.py
+!/tools/build-gba-link.sh
+!/tools/prepare-gba-link.sh
+!/tools/patch-mgba-netplay.py
+!/tools/build-gba-fixtures.py
+!/tools/gba-link-fixture.c
+!/tools/test-gba-link.py
 !/tools/profile-azahar.ps1
 !/tools/analyze-azahar-profile.mjs
 !/tools/test-azahar-hotpaths.sh
